@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Iraq Health — لوحة الإدارة</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background:#0f1117; color:#eee; min-height:100vh; }
+  .login-screen { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; padding:20px; }
+  .login-box { background:#1a1a2e; border-radius:16px; padding:30px; width:100%; max-width:360px; }
+  .login-box h2 { text-align:center; margin-bottom:20px; color:#1a7a3c; }
+  input, select, textarea { width:100%; padding:12px; border-radius:10px; border:1px solid #333; background:#0f1117; color:#eee; font-size:0.95rem; font-family:inherit; margin-bottom:12px; }
+  textarea { min-height:80px; resize:vertical; }
+  .btn { width:100%; padding:13px; border-radius:10px; border:none; font-size:1rem; font-weight:700; cursor:pointer; font-family:inherit; }
+  .btn-green { background:#1a7a3c; color:white; }
+  .btn-red { background:#e74c3c; color:white; }
+  .btn-blue { background:#1565c0; color:white; }
+  .btn-gray { background:#333; color:white; }
+  .header { background:linear-gradient(135deg,#1a7a3c,#0f5c2c); padding:14px 16px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; }
+  .header h1 { font-size:1rem; color:white; }
+  .logout-btn { background:rgba(255,255,255,0.2); border:none; color:white; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:0.8rem; }
+  .stats { display:flex; gap:8px; padding:12px; background:#1a1a2e; }
+  .stat { flex:1; text-align:center; padding:10px; background:#0f1117; border-radius:10px; }
+  .stat-num { font-size:1.3rem; font-weight:800; color:#1a7a3c; }
+  .stat-label { font-size:0.65rem; color:#888; }
+  .search-bar { padding:10px 12px; background:#1a1a2e; }
+  .search-bar input { margin:0; }
+  .doctor-list { padding:8px 12px 80px; }
+  .doc-card { background:#1a1a2e; border-radius:12px; padding:14px; margin-bottom:8px; border:1px solid #222; }
+  .doc-name { font-weight:700; font-size:0.95rem; margin-bottom:4px; }
+  .doc-spec { color:#1a7a3c; font-size:0.78rem; margin-bottom:4px; }
+  .doc-info { font-size:0.75rem; color:#888; margin-bottom:8px; }
+  .doc-actions { display:flex; gap:8px; }
+  .doc-actions button { flex:1; padding:8px; border-radius:8px; border:none; font-size:0.75rem; cursor:pointer; font-family:inherit; font-weight:600; }
+  .edit-btn { background:#1565c0; color:white; }
+  .del-btn { background:#e74c3c; color:white; }
+  .fab { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#1a7a3c; color:white; border:none; padding:14px 30px; border-radius:25px; font-size:1rem; font-weight:700; cursor:pointer; font-family:inherit; box-shadow:0 4px 15px rgba(0,0,0,0.4); z-index:100; }
+  .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:200; align-items:flex-end; }
+  .modal.show { display:flex; }
+  .modal-box { background:#1a1a2e; border-radius:22px 22px 0 0; width:100%; max-height:92vh; overflow-y:auto; padding:20px; }
+  .modal-title { font-size:1.1rem; font-weight:700; margin-bottom:16px; text-align:center; }
+  .modal-actions { display:flex; gap:10px; margin-top:10px; }
+  .loading-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:300; display:flex; align-items:center; justify-content:center; font-size:1.2rem; }
+  .hidden { display:none; }
+  .empty { text-align:center; padding:40px; color:#555; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div class="login-screen" id="loginScreen">
+  <div class="login-box">
+    <h2>🏥 لوحة الإدارة</h2>
+    <input type="password" id="passwordInput" placeholder="كلمة السر" onkeydown="if(event.key==='Enter')login()">
+    <button class="btn btn-green" onclick="login()">دخول</button>
+    <p id="loginError" style="color:#e74c3c;text-align:center;margin-top:10px;font-size:0.85rem;"></p>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="mainApp" class="hidden">
+  <div class="header">
+    <h1>🏥 Iraq Health — الإدارة</h1>
+    <button class="logout-btn" onclick="logout()">خروج</button>
+  </div>
+  
+  <div class="stats">
+    <div class="stat"><div class="stat-num" id="totalCount">0</div><div class="stat-label">طبيب</div></div>
+    <div class="stat"><div class="stat-num" id="specCount">0</div><div class="stat-label">تخصص</div></div>
+    <div class="stat"><div class="stat-num" id="areaCount">0</div><div class="stat-label">منطقة</div></div>
+  </div>
+
+  <div class="search-bar">
+    <input type="text" id="searchInput" placeholder="ابحث عن طبيب..." oninput="filterList()">
+  </div>
+
+  <div class="doctor-list" id="doctorList"></div>
+  
+  <button class="fab" onclick="openAddModal()">+ إضافة طبيب</button>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="modal" id="editModal">
+  <div class="modal-box">
+    <div class="modal-title" id="modalTitle">إضافة طبيب</div>
+    <input type="hidden" id="editId">
+    <input type="text" id="editName" placeholder="اسم الطبيب *">
+    <input type="text" id="editSpec" placeholder="التخصص *">
+    <input type="text" id="editAddr" placeholder="العنوان">
+    <input type="text" id="editArea" placeholder="المنطقة">
+    <input type="text" id="editPh" placeholder="هاتف 1">
+    <input type="text" id="editPh2" placeholder="هاتف 2">
+    <textarea id="editNotes" placeholder="ملاحظات"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-gray" onclick="closeModal()">إلغاء</button>
+      <button class="btn btn-green" onclick="saveDoctor()">حفظ</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Confirm Modal -->
+<div class="modal" id="deleteModal">
+  <div class="modal-box">
+    <div class="modal-title">⚠️ تأكيد الحذف</div>
+    <p style="text-align:center;margin-bottom:20px;color:#aaa;">هل تريد حذف هذا الطبيب؟</p>
+    <div class="modal-actions">
+      <button class="btn btn-gray" onclick="closeDeleteModal()">إلغاء</button>
+      <button class="btn btn-red" onclick="confirmDelete()">حذف</button>
+    </div>
+  </div>
+</div>
+
+<div id="loadingOverlay" class="loading-overlay hidden">⏳ جاري التحميل...</div>
+
+<script>
+const SUPABASE_URL = 'https://hygujebngiwemwujjcgm.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_uBUSEwIjW2hIGE8FnB48cw_pKHYdBsx';
+const ADMIN_PASSWORD = 'IraqHealth2025@';
+
+let allDoctors = [];
+let filteredDoctors = [];
+let deleteId = null;
+
+function login() {
+  const pw = document.getElementById('passwordInput').value;
+  if (pw === ADMIN_PASSWORD) {
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('mainApp').classList.remove('hidden');
+    loadDoctors();
+  } else {
+    document.getElementById('loginError').textContent = '❌ كلمة السر غلط';
+  }
+}
+
+function logout() {
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('mainApp').classList.add('hidden');
+  document.getElementById('passwordInput').value = '';
+}
+
+function showLoading(show) {
+  document.getElementById('loadingOverlay').classList.toggle('hidden', !show);
+}
+
+async function apiRequest(method, path, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method,
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (method === 'DELETE' || (method === 'PATCH' && res.status === 204)) return true;
+  return res.json();
+}
+
+async function loadDoctors() {
+  showLoading(true);
+  let allData = [];
+  let from = 0;
+  while(true) {
+    const data = await apiRequest('GET', `doctors?select=*&order=id&offset=${from}&limit=1000`);
+    if (!data.length) break;
+    allData.push(...data);
+    if (data.length < 1000) break;
+    from += 1000;
+  }
+  allDoctors = allData;
+  filteredDoctors = allDoctors;
+  updateStats();
+  renderList();
+  showLoading(false);
+}
+
+function updateStats() {
+  document.getElementById('totalCount').textContent = allDoctors.length;
+  document.getElementById('specCount').textContent = new Set(allDoctors.map(d=>d.spec).filter(Boolean)).size;
+  document.getElementById('areaCount').textContent = new Set(allDoctors.map(d=>d.area).filter(Boolean)).size;
+}
+
+function filterList() {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  filteredDoctors = q ? allDoctors.filter(d =>
+    (d.name||'').toLowerCase().includes(q) ||
+    (d.spec||'').toLowerCase().includes(q) ||
+    (d.area||'').toLowerCase().includes(q)
+  ) : allDoctors;
+  renderList();
+}
+
+function renderList() {
+  const container = document.getElementById('doctorList');
+  if (!filteredDoctors.length) {
+    container.innerHTML = '<div class="empty">لا توجد نتائج</div>';
+    return;
+  }
+  container.innerHTML = filteredDoctors.slice(0, 100).map(d => `
+    <div class="doc-card">
+      <div class="doc-name">${d.name || '—'}</div>
+      <div class="doc-spec">${d.spec || ''}</div>
+      <div class="doc-info">${d.area ? '📍 ' + d.area : ''} ${d.ph ? '📞 ' + d.ph : ''}</div>
+      <div class="doc-actions">
+        <button class="edit-btn" onclick="openEditModal(${d.id})">✏️ تعديل</button>
+        <button class="del-btn" onclick="openDeleteModal(${d.id})">🗑️ حذف</button>
+      </div>
+    </div>
+  `).join('') + (filteredDoctors.length > 100 ? `<div class="empty">يُعرض 100 من ${filteredDoctors.length} — استخدم البحث</div>` : '');
+}
+
+function openAddModal() {
+  document.getElementById('modalTitle').textContent = '➕ إضافة طبيب';
+  document.getElementById('editId').value = '';
+  ['editName','editSpec','editAddr','editArea','editPh','editPh2','editNotes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('editModal').classList.add('show');
+}
+
+function openEditModal(id) {
+  const d = allDoctors.find(x => x.id === id);
+  if (!d) return;
+  document.getElementById('modalTitle').textContent = '✏️ تعديل طبيب';
+  document.getElementById('editId').value = d.id;
+  document.getElementById('editName').value = d.name || '';
+  document.getElementById('editSpec').value = d.spec || '';
+  document.getElementById('editAddr').value = d.addr || '';
+  document.getElementById('editArea').value = d.area || '';
+  document.getElementById('editPh').value = d.ph || '';
+  document.getElementById('editPh2').value = d.ph2 || '';
+  document.getElementById('editNotes').value = d.notes || '';
+  document.getElementById('editModal').classList.add('show');
+}
+
+function closeModal() {
+  document.getElementById('editModal').classList.remove('show');
+}
+
+async function saveDoctor() {
+  const id = document.getElementById('editId').value;
+  const doc = {
+    name: document.getElementById('editName').value.trim(),
+    spec: document.getElementById('editSpec').value.trim(),
+    addr: document.getElementById('editAddr').value.trim(),
+    area: document.getElementById('editArea').value.trim(),
+    ph: document.getElementById('editPh').value.trim(),
+    ph2: document.getElementById('editPh2').value.trim(),
+    notes: document.getElementById('editNotes').value.trim(),
+  };
+  if (!doc.name || !doc.spec) { alert('الاسم والتخصص مطلوبان'); return; }
+  showLoading(true);
+  closeModal();
+  if (id) {
+    await apiRequest('PATCH', `doctors?id=eq.${id}`, doc);
+    const idx = allDoctors.findIndex(x => x.id == id);
+    if (idx !== -1) allDoctors[idx] = {...allDoctors[idx], ...doc};
+  } else {
+    const res = await apiRequest('POST', 'doctors', doc);
+    if (Array.isArray(res)) allDoctors.unshift(res[0]);
+  }
+  filteredDoctors = allDoctors;
+  updateStats();
+  renderList();
+  showLoading(false);
+}
+
+function openDeleteModal(id) {
+  deleteId = id;
+  document.getElementById('deleteModal').classList.add('show');
+}
+
+function closeDeleteModal() {
+  document.getElementById('deleteModal').classList.remove('show');
+  deleteId = null;
+}
+
+async function confirmDelete() {
+  if (!deleteId) return;
+  showLoading(true);
+  closeDeleteModal();
+  await apiRequest('DELETE', `doctors?id=eq.${deleteId}`);
+  allDoctors = allDoctors.filter(x => x.id !== deleteId);
+  filteredDoctors = allDoctors;
+  updateStats();
+  renderList();
+  showLoading(false);
+  deleteId = null;
+}
+</script>
+</body>
+</html>
