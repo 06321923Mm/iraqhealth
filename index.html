@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Iraq Health | دليل الأطباء</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; background: #f0f5f0; color: #1a1a2e; }
+  .header {
+    background: linear-gradient(135deg, #1a7a3c, #0f5c2c);
+    color: white; padding: 14px 16px;
+    display: flex; align-items: center; justify-content: space-between;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.25);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .logo-icon { width: 40px; height: 40px; background: white; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; }
+  .logo-text .name-en { font-size: 1.1rem; font-weight: 800; }
+  .logo-text .name-ar { font-size: 0.72rem; opacity: 0.85; }
+  .header-badge { background: rgba(255,255,255,0.2); border-radius: 20px; padding: 4px 10px; font-size: 0.72rem; border: 1px solid rgba(255,255,255,0.3); }
+  .hero { background: linear-gradient(160deg, #1a7a3c, #0f5c2c); color: white; padding: 20px 16px 28px; text-align: center; }
+  .hero h2 { font-size: 1.3rem; font-weight: 700; margin-bottom: 6px; }
+  .hero p { font-size: 0.85rem; opacity: 0.9; margin-bottom: 16px; }
+  .hero-search { display: flex; gap: 8px; align-items: center; background: white; border-radius: 14px; padding: 12px 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+  .hero-search input { border: none; background: transparent; width: 100%; font-size: 0.95rem; outline: none; font-family: inherit; color: #333; }
+  .hero-search input::placeholder { color: #aaa; }
+  .search-btn { background: #1a7a3c; color: white; border: none; padding: 8px 14px; border-radius: 10px; font-size: 0.85rem; cursor: pointer; font-family: inherit; white-space: nowrap; }
+  .stats { display: flex; gap: 8px; padding: 14px 12px; background: white; border-bottom: 1px solid #e8f0e8; }
+  .stat { flex: 1; text-align: center; padding: 10px 6px; background: #f0f8f0; border-radius: 12px; }
+  .stat-num { font-size: 1.3rem; font-weight: 800; color: #1a7a3c; }
+  .stat-label { font-size: 0.68rem; color: #666; margin-top: 2px; }
+  .section-title { padding: 12px 16px 6px; font-size: 0.82rem; font-weight: 700; color: #444; }
+  .filters { display: flex; gap: 8px; overflow-x: auto; padding: 4px 12px 10px; scrollbar-width: none; }
+  .filters::-webkit-scrollbar { display: none; }
+  .filter-btn { white-space: nowrap; padding: 8px 14px; border-radius: 20px; border: 2px solid #c8e0c8; background: white; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; font-family: inherit; color: #444; }
+  .filter-btn.active { background: #1a7a3c; border-color: #1a7a3c; color: white; font-weight: 600; }
+  .results-bar { padding: 6px 16px; font-size: 0.8rem; color: #888; background: #f8fbf8; }
+  .results-bar span { color: #1a7a3c; font-weight: 700; }
+  .cards { padding: 8px 12px 90px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: white; border-radius: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); overflow: hidden; border: 1px solid #e4f0e4; cursor: pointer; }
+  .card-body { display: flex; gap: 12px; padding: 14px; }
+  .avatar { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; flex-shrink: 0; }
+  .card-info { flex: 1; min-width: 0; }
+  .doc-name { font-size: 0.95rem; font-weight: 700; margin-bottom: 4px; }
+  .spec-badge { display: inline-block; padding: 3px 9px; border-radius: 8px; font-size: 0.7rem; font-weight: 600; margin-bottom: 5px; }
+  .doc-addr { font-size: 0.77rem; color: #666; line-height: 1.45; }
+  .area-pill { display: inline-flex; align-items: center; gap: 3px; font-size: 0.7rem; color: #1a7a3c; background: #e8f5e8; padding: 2px 8px; border-radius: 6px; margin-top: 5px; }
+  .notes-pill { display: inline-flex; align-items: center; gap: 3px; font-size: 0.68rem; color: #e67e22; background: #fef9e7; padding: 2px 8px; border-radius: 6px; margin-top: 4px; }
+  .card-footer { display: flex; border-top: 1px solid #f0f5f0; background: #fafafa; }
+  .foot-btn { flex: 1; padding: 10px 4px; border: none; background: transparent; font-family: inherit; font-size: 0.75rem; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 3px; border-left: 1px solid #f0f0f0; }
+  .foot-btn:last-child { border-left: none; }
+  .foot-btn.green { color: #1a7a3c; }
+  .foot-btn.teal { color: #25D366; }
+  .foot-btn.red { color: #e74c3c; }
+  .foot-icon { font-size: 1.1rem; }
+  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 200; align-items: flex-end; }
+  .overlay.show { display: flex; }
+  .sheet { background: white; border-radius: 22px 22px 0 0; width: 100%; max-height: 88vh; overflow-y: auto; padding: 0 0 20px; animation: up 0.3s ease; }
+  @keyframes up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .sheet-handle { width: 40px; height: 4px; background: #ddd; border-radius: 2px; margin: 14px auto 0; }
+  .sheet-header { background: linear-gradient(135deg, #1a7a3c, #0f5c2c); color: white; padding: 20px 16px; margin-top: 8px; display: flex; gap: 14px; align-items: center; }
+  .sheet-avatar { width: 60px; height: 60px; background: rgba(255,255,255,0.2); border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 2rem; }
+  .sheet-name { font-size: 1.05rem; font-weight: 700; }
+  .sheet-spec { font-size: 0.82rem; opacity: 0.85; margin-top: 3px; }
+  .sheet-body { padding: 16px; }
+  .info-group { margin-bottom: 16px; }
+  .info-group-title { font-size: 0.75rem; color: #888; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; }
+  .info-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; background: #f5faf5; border-radius: 10px; margin-bottom: 6px; font-size: 0.87rem; line-height: 1.4; }
+  .info-item .ic { font-size: 1.1rem; flex-shrink: 0; }
+  .sheet-btns { display: flex; gap: 10px; padding: 0 16px; }
+  .sheet-btn { flex: 1; padding: 13px; border-radius: 14px; border: none; font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; display: flex; align-items: center; justify-content: center; gap: 7px; }
+  .btn-g { background: #1a7a3c; color: white; }
+  .btn-w { background: #25D366; color: white; }
+  .doc-cta { margin: 10px 12px 4px; background: linear-gradient(135deg, #0f5c2c, #1a7a3c); border-radius: 16px; padding: 16px; color: white; display: flex; gap: 12px; align-items: center; }
+  .cta-icon { font-size: 2.2rem; }
+  .cta-text h3 { font-size: 0.92rem; font-weight: 700; }
+  .cta-text p { font-size: 0.74rem; opacity: 0.85; margin-top: 3px; }
+  .cta-btn { background: white; color: #0f5c2c; border: none; padding: 7px 13px; border-radius: 9px; font-size: 0.78rem; font-weight: 700; cursor: pointer; margin-top: 9px; font-family: inherit; }
+  .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: white; display: flex; box-shadow: 0 -2px 14px rgba(0,0,0,0.1); border-top: 1px solid #eee; z-index: 100; }
+  .nav-btn { flex: 1; padding: 10px 4px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 0.66rem; color: #aaa; cursor: pointer; border: none; background: transparent; font-family: inherit; }
+  .nav-btn.active { color: #1a7a3c; }
+  .nav-btn .ni { font-size: 1.3rem; }
+  .empty { text-align: center; padding: 50px 20px; color: #bbb; }
+  .empty .ei { font-size: 3rem; margin-bottom: 10px; }
+</style>
+<!-- Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-048MZ1TW1B"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-048MZ1TW1B');
+</script>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#1a7a3c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Iraq Health">
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">🏥</div>
+    <div class="logo-text">
+      <div class="name-en">Iraq Health</div>
+      <div class="name-ar">دليل الأطباء العراقي</div>
+    </div>
+  </div>
+  <div class="header-badge">🇮🇶 البصرة</div>
+</div>
+
+
+<div style="background:#1a1a2e;border-top:2px solid #1a7a3c;border-bottom:2px solid #1a7a3c;padding:10px 16px;text-align:center;font-size:0.82rem;color:#aaa;line-height:1.8;">
+  📲 للإضافة والحذف والتعديل: تواصل عبر واتساب حصراً <strong><a href="https://wa.me/+9647770738575" style="color:#1a7a3c;">07770738575</a></strong><br>
+  💚 نتمنى لكم الشفاء العاجل
+</div>
+<div class="hero">
+  <h2>ابحث عن طبيبك في البصرة</h2>
+  <p>أكثر من 1600 طبيب في جميع التخصصات</p>
+  <div class="hero-search">
+    <span>🔍</span>
+    <input type="text" id="searchInput" placeholder="اسم الطبيب، التخصص، المنطقة..." oninput="filterDocs()">
+    <select id="areaDropdown" onchange="filterDocs()" style="width:100%;padding:10px;border-radius:10px;border:1px solid #333;background:#1a1a2e;color:#eee;font-size:0.9rem;margin-top:8px;font-family:inherit;">
+      <option value="">كل المناطق</option>
+    </select>
+    <button class="search-btn" onclick="filterDocs()">بحث</button>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="stat-num" id="totalStat">0</div><div class="stat-label">طبيب</div></div>
+  <div class="stat"><div class="stat-num" id="specStat">0</div><div class="stat-label">تخصص</div></div>
+  <div class="stat"><div class="stat-num" id="areaStat">0</div><div class="stat-label">منطقة</div></div>
+</div>
+
+<div class="section-title">التخصصات</div>
+<div class="filters" id="filtersWrap"></div>
+<div class="results-bar">يُعرض <span id="shownCount">0</span> طبيب</div>
+
+<div class="doc-cta">
+  <div class="cta-icon">👨‍⚕️</div>
+  <div class="cta-text" style="flex:1">
+    <h3>هل أنت طبيب؟</h3>
+    <p>سجّل عيادتك مجاناً واستقبل مرضى جدد</p>
+    <button class="cta-btn" onclick="alert('تواصل معنا على واتساب لتسجيل عيادتك')">سجّل الآن مجاناً ←</button>
+  </div>
+</div>
+
+<div class="cards" id="cardsWrap"></div>
+
+<div class="overlay" id="overlay" onclick="closeSheet(event)">
+  <div class="sheet"><div class="sheet-handle"></div><div id="sheetContent"></div></div>
+</div>
+
+<div class="bottom-nav">
+  <button class="nav-btn active" onclick="navClick(this,'home')"><span class="ni">🏠</span>الرئيسية</button>
+  <button class="nav-btn" onclick="navClick(this,'search')"><span class="ni">🔍</span>بحث</button>
+  <button class="nav-btn" onclick="navClick(this,'book')"><span class="ni">📅</span>حجز</button>
+  <button class="nav-btn" onclick="navClick(this,'profile')"><span class="ni">👤</span>حسابي</button>
+</div>
+
+<script>
+const allDoctors = [];
+
+async function loadDoctors() {
+  const SUPABASE_URL = 'https://hygujebngiwemwujjcgm.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_uBUSEwIjW2hIGE8FnB48cw_pKHYdBsx';
+  
+  document.getElementById("cardsWrap").innerHTML = '<div class="loading">⏳ جاري تحميل البيانات...</div>';
+  
+  let allData = [];
+  let from = 0;
+  const pageSize = 1000;
+  
+  while(true) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/doctors?select=*&order=id&offset=${from}&limit=${pageSize}`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`
+      }
+    });
+    const data = await res.json();
+    if (!data.length) break;
+    allData.push(...data);
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  
+  allDoctors.push(...allData);
+  buildFilters();
+  const specs = new Set(allDoctors.map(d => d.spec).filter(Boolean));
+  const areas = new Set(allDoctors.map(d => d.area).filter(Boolean));
+  document.getElementById("totalStat").textContent = allDoctors.length.toLocaleString();
+  document.getElementById("specStat").textContent = specs.size;
+  document.getElementById("areaStat").textContent = areas.size;
+  filteredDocs = allDoctors;
+  document.getElementById("shownCount").textContent = filteredDocs.length;
+  renderPage();
+}
+
+loadDoctors();
+
+const SPEC_MAP = {
+  "الأسنان":           {bg:"#e3f2fd",badge:"#1565c0",em:"🦷"},
+  "العيون":            {bg:"#e8f5e9",badge:"#2e7d32",em:"👁️"},
+  "الأطفال":           {bg:"#fff3e0",badge:"#e65100",em:"👶"},
+  "النسائية":          {bg:"#fce4ec",badge:"#c62828",em:"🤰"},
+  "جراحة أطفال":       {bg:"#fff3e0",badge:"#e65100",em:"👶"},
+  "الباطنية والصدرية والقلبية": {bg:"#fbe9e7",badge:"#bf360c",em:"🫀"},
+  "القلبية":           {bg:"#fbe9e7",badge:"#bf360c",em:"🫀"},
+  "الكسور والمفاصل":   {bg:"#f3e5f5",badge:"#6a1b9a",em:"🦴"},
+  "المفاصل":           {bg:"#f3e5f5",badge:"#6a1b9a",em:"🦴"},
+  "جراحة عامه":        {bg:"#e8eaf6",badge:"#283593",em:"🔪"},
+  "الجراحة التجميلية": {bg:"#fce4ec",badge:"#c62828",em:"✨"},
+  "جراحة المجاري البولية": {bg:"#e0f7fa",badge:"#00695c",em:"🫘"},
+  "الجلدية والتناسلية والتجميلية": {bg:"#fff8e1",badge:"#f57f17",em:"🧴"},
+  "طب الجملة العصبية": {bg:"#ede7f6",badge:"#4527a0",em:"🧠"},
+  "جراحة الجملة العصبية": {bg:"#ede7f6",badge:"#4527a0",em:"🧠"},
+  "النفسية":           {bg:"#e8eaf6",badge:"#283593",em:"🧘"},
+  "انف واذن وحنجره":   {bg:"#e0f2f1",badge:"#004d40",em:"👂"},
+  "السمع والنطق والتوازن": {bg:"#e0f2f1",badge:"#004d40",em:"👂"},
+  "الباطنية - غدد الصماء والسكري": {bg:"#fff8e1",badge:"#f57f17",em:"💉"},
+  "الباطنية - أمراض الكل": {bg:"#e3f2fd",badge:"#1565c0",em:"🫘"},
+  "الباطنية - أمراض الدم": {bg:"#fbe9e7",badge:"#bf360c",em:"🩸"},
+  "الباطنية - الأورام": {bg:"#fafafa",badge:"#424242",em:"🔬"},
+  "الطب النووي والغدة الدرقية": {bg:"#fff8e1",badge:"#f57f17",em:"☢️"},
+  "التغذية":           {bg:"#e8f5e9",badge:"#2e7d32",em:"🥗"},
+  "طب المجتمع وطب عام":{bg:"#fafafa",badge:"#424242",em:"🩺"},
+  "الصيدليات":         {bg:"#e8f5e9",badge:"#2e7d32",em:"💊"},
+  "المجمعات الطبية":   {bg:"#e3f2fd",badge:"#1565c0",em:"🏥"},
+};
+const DEFAULT_COLORS = [
+  {bg:"#e8f5e9",badge:"#2e7d32",em:"🩺"},
+  {bg:"#e3f2fd",badge:"#1565c0",em:"🔬"},
+  {bg:"#fff3e0",badge:"#e65100",em:"💊"},
+];
+const specColorMap = {};
+function getColor(spec) {
+  if (SPEC_MAP[spec]) return SPEC_MAP[spec];
+  if (!specColorMap[spec]) {
+    const idx = Object.keys(specColorMap).length % DEFAULT_COLORS.length;
+    specColorMap[spec] = DEFAULT_COLORS[idx];
+  }
+  return specColorMap[spec];
+}
+
+let activeFilter = "الكل";
+let activeArea = "";
+let currentPage = 0;
+const PAGE_SIZE = 30;
+let filteredDocs = [];
+
+function buildFilters() {
+  const specs = ["الكل", ...new Set(allDoctors.map(d => d.spec).filter(Boolean))];
+  document.getElementById("filtersWrap").innerHTML = specs.map(s => {
+    return `<button class="filter-btn ${s==='الكل'?'active':''}" onclick="setFilter('${s.replace(/'/g,"\'")}')"> ${s}</button>`;
+  }).join('');
+  
+  // Sort areas by doctor count
+  const areaCounts = {};
+  allDoctors.forEach(d => { if(d.area) areaCounts[d.area] = (areaCounts[d.area]||0) + 1; });
+  const areas = Object.keys(areaCounts).sort((a,b) => areaCounts[b] - areaCounts[a]);
+  const dropdown = document.getElementById("areaDropdown");
+  dropdown.innerHTML = '<option value="">كل المناطق</option>' + 
+    areas.map(a => `<option value="${a}">${a} (${areaCounts[a]})</option>`).join('');
+}
+
+function setFilter(spec) {
+  activeFilter = spec;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent.trim() === spec || (spec==='الكل' && b.textContent.trim()==='الكل'));
+  });
+  filterDocs();
+}
+
+function filterDocs() {
+  const q = document.getElementById("searchInput").value.trim().toLowerCase();
+  const area = document.getElementById("areaDropdown").value;
+  filteredDocs = allDoctors;
+  if (activeFilter !== "الكل") filteredDocs = filteredDocs.filter(d => d.spec === activeFilter);
+  if (area) filteredDocs = filteredDocs.filter(d => d.area === area);
+  if (q) filteredDocs = filteredDocs.filter(d =>
+    (d.name||"").toLowerCase().includes(q) ||
+    (d.spec||"").toLowerCase().includes(q) ||
+    (d.area||"").toLowerCase().includes(q) ||
+    (d.addr||"").toLowerCase().includes(q)
+  );
+  currentPage = 0;
+  document.getElementById("shownCount").textContent = filteredDocs.length;
+  renderPage();
+}
+
+function renderPage() {
+  const end = (currentPage + 1) * PAGE_SIZE;
+  const data = filteredDocs.slice(0, end);
+  const container = document.getElementById("cardsWrap");
+  if (filteredDocs.length === 0) {
+    container.innerHTML = `<div class="empty"><div class="ei">🔍</div><p>لا توجد نتائج</p></div>`;
+    return;
+  }
+  container.innerHTML = data.map(d => {
+    const idx = allDoctors.indexOf(d);
+    const c = getColor(d.spec);
+    return `
+    <div class="card" onclick="openSheet(${idx})">
+      <div class="card-body">
+        <div class="avatar" style="background:${c.bg}">${c.em}</div>
+        <div class="card-info">
+          <div class="doc-name">${d.name || '—'}</div>
+          <span class="spec-badge" style="background:${c.bg};color:${c.badge}">${d.spec}</span>
+          ${d.addr ? `<div class="doc-addr">${d.addr}</div>` : ''}
+          ${d.area ? `<span class="area-pill">📍 ${d.area}</span>` : ''}
+          ${d.notes ? `<br><span class="notes-pill">⏰ ${d.notes}</span>` : ''}
+        </div>
+      </div>
+      <div class="card-footer">
+        <button class="foot-btn green" onclick="event.stopPropagation();window.location='tel:${d.ph}'">
+          <span class="foot-icon">📞</span>اتصال
+        </button>
+        <button class="foot-btn teal" onclick="event.stopPropagation();openWA(allDoctors[${idx}].ph)" >
+          <span class="foot-icon">💬</span>واتساب
+        </button>
+        <button class="foot-btn red" onclick="event.stopPropagation();window.open('https://maps.google.com/?q=${encodeURIComponent((d.addr||"") + " البصرة العراق")}')">
+          <span class="foot-icon">📍</span>الموقع
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+  if (end < filteredDocs.length) {
+    container.innerHTML += `<button onclick="loadMore()" style="width:100%;padding:14px;background:#1a7a3c;color:white;border:none;border-radius:12px;font-size:0.9rem;font-weight:700;cursor:pointer;font-family:inherit;margin-top:4px">تحميل المزيد (${filteredDocs.length - end} متبقي)</button>`;
+  }
+}
+
+function loadMore() { currentPage++; renderPage(); }
+
+function openWA(phone) {
+  if (!phone) return;
+  let n = phone.replace(/\D/g, '');
+  if (n.startsWith('964')) {}
+  else if (n.startsWith('0')) { n = '964' + n.substring(1); }
+  else { n = '964' + n; }
+  window.open('https://wa.me/' + n, '_blank');
+}
+
+function openSheet(idx) {
+  const d = allDoctors[idx];
+  const c = getColor(d.spec);
+  document.getElementById("sheetContent").innerHTML = `
+    <div class="sheet-header">
+      <div class="sheet-avatar">${c.em}</div>
+      <div><div class="sheet-name">${d.name || '—'}</div><div class="sheet-spec">${d.spec}</div></div>
+    </div>
+    <div class="sheet-body">
+      <div class="info-group">
+        <div class="info-group-title">التواصل</div>
+        ${d.ph ? `<div class="info-item"><span class="ic">📞</span>${d.ph}</div>` : ''}
+        ${d.ph2 ? `<div class="info-item"><span class="ic">📞</span>${d.ph2}</div>` : ''}
+      </div>
+      ${d.addr ? `<div class="info-group"><div class="info-group-title">الموقع</div><div class="info-item"><span class="ic">📍</span>${d.addr}</div>${d.area ? `<div class="info-item"><span class="ic">🏙️</span>منطقة ${d.area}</div>` : ''}</div>` : ''}
+      ${d.notes ? `<div class="info-group"><div class="info-group-title">ملاحظات</div><div class="info-item"><span class="ic">ℹ️</span>${d.notes}</div></div>` : ''}
+    </div>
+    <div class="sheet-btns">
+      ${d.ph ? `<button class="sheet-btn btn-g" onclick="window.location='tel:${d.ph}'">📞 اتصال الآن</button>` : ''}
+      ${d.ph ? `<button class="sheet-btn btn-w" onclick="openWA(allDoctors[${idx}].ph)">💬 واتساب</button>` : ''}
+    </div>`;
+  document.getElementById("overlay").classList.add("show");
+}
+
+function closeSheet(e) {
+  if (e.target === document.getElementById("overlay"))
+    document.getElementById("overlay").classList.remove("show");
+}
+
+function navClick(btn, page) {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (page === 'search') {
+    document.getElementById('searchInput').focus();
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } else if (page === 'book') {
+    alert('ميزة الحجز قريباً!');
+  } else if (page === 'profile') {
+    alert('ميزة الحساب قريباً!');
+  }
+}
+
+
+</script>
+
+<div id="installBanner" style="display:none;position:fixed;bottom:70px;left:50%;transform:translateX(-50%);z-index:999;background:#1a7a3c;color:white;padding:12px 20px;border-radius:25px;font-size:0.9rem;font-weight:700;box-shadow:0 4px 20px rgba(0,0,0,0.4);cursor:pointer;white-space:nowrap;" onclick="installApp()">
+  📲 تنزيل التطبيق
+</div>
+
+<script>
+let deferredPrompt;
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  document.getElementById('installBanner').style.display = 'block';
+});
+
+function installApp() {
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    deferredPrompt.userChoice.then(() => {
+      deferredPrompt = null;
+      document.getElementById('installBanner').style.display = 'none';
+    });
+  }
+}
+
+window.addEventListener('appinstalled', () => {
+  document.getElementById('installBanner').style.display = 'none';
+});
+</script>
+</body>
+</html>
