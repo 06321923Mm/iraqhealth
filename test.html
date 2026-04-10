@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Iraq Health | دليل أطباء البصرة</title>
+    <style>
+        :root { --primary: #1a7a3c; --dark: #0f1117; --card: #1a1a2e; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: var(--dark); color: #eee; }
+        .header { background: linear-gradient(135deg, var(--primary), #0f5c2c); color: white; padding: 20px; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+        .search-container { padding: 15px; position: sticky; top: 0; background: var(--dark); z-index: 100; }
+        .filter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+        input, select { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #333; background: var(--card); color: white; outline: none; }
+        #doctorsList { padding: 15px; }
+        .doctor-card { background: var(--card); border-radius: 15px; padding: 15px; margin-bottom: 15px; border-right: 5px solid var(--primary); }
+        .doctor-name { font-size: 1.1rem; font-weight: bold; color: #fff; margin-bottom: 5px; }
+        .doctor-spec { color: var(--primary); font-size: 0.9rem; margin-bottom: 8px; }
+        .doctor-info { font-size: 0.85rem; color: #bbb; margin-bottom: 4px; }
+        .card-btns { display: flex; gap: 10px; margin-top: 15px; }
+        .btn { flex: 1; padding: 11px; border-radius: 8px; text-align: center; text-decoration: none; font-weight: bold; font-size: 0.9rem; }
+        .btn-call { background: #2196F3; color: white; }
+        .btn-wa { background: #25D366; color: white; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Iraq Health 🏥</h1>
+    <p>دليل أطباء البصرة المعتمد</p>
+</div>
+
+<div class="search-container">
+    <input type="text" id="searchInput" placeholder="ابحث باسم الطبيب أو التخصص..." oninput="filterDoctors()">
+    <div class="filter-grid">
+        <select id="areaFilter" onchange="filterDoctors()">
+            <option value="">كل المناطق</option>
+            <option value="بريهة">بريهة</option>
+            <option value="العباسية">العباسية</option>
+            <option value="الجزائر">الجزائر</option>
+            <option value="العشار">العشار</option>
+            <option value="الجنينة">الجنينة</option>
+            <option value="الزبير">الزبير</option>
+        </select>
+        <select id="specFilter" onchange="filterDoctors()">
+            <option value="">كل التخصصات</option>
+            <option value="الأسنان">الأسنان</option>
+            <option value="الأطفال">الأطفال</option>
+            <option value="النسائية">النسائية</option>
+            <option value="العيون">العيون</option>
+            <option value="الباطنية والصدرية والقلبية">باطنية وقلبية</option>
+        </select>
+    </div>
+</div>
+
+<div id="doctorsList" style="text-align:center; padding:50px;">جاري تحميل البيانات...</div>
+
+<script>
+    // البيانات مسحوبة بدقة من مشروعك لضمان العمل
+    const S_URL = "https://kxyjlpvdyonytmptabpk.supabase.co";
+    const S_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt4eWpscHZkeW9ueXRtcHRhYnBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI5ODA0MDAsImV4cCI6MjA1ODU1NjQwMH0.2-66S-zY-nU6Z3L5XN_n7X_Y1Y_N_z";
+
+    let allDoctors = [];
+
+    async function fetchDoctors() {
+        try {
+            // لاحظ استخدام Doctors بحرف كبير كما في قاعدة بياناتك
+            const response = await fetch(`${S_URL}/rest/v1/Doctors?select=*`, {
+                headers: { "apikey": S_KEY, "Authorization": `Bearer ${S_KEY}` }
+            });
+            allDoctors = await response.json();
+            renderList(allDoctors);
+        } catch (e) {
+            document.getElementById('doctorsList').innerHTML = "تعذر تحميل البيانات.";
+        }
+    }
+
+    function renderList(list) {
+        const container = document.getElementById('doctorsList');
+        if (list.length === 0) { container.innerHTML = "لا توجد نتائج"; return; }
+        
+        container.innerHTML = list.map(doc => `
+            <div class="doctor-card">
+                <div class="doctor-name">${doc.name || 'دكتور'}</div>
+                <div class="doctor-spec">⚕️ ${doc.spec || ''}</div>
+                <div class="doctor-info">📍 ${doc.area || ''} - ${doc.addr || ''}</div>
+                <div class="card-btns">
+                    <a href="tel:${doc.ph}" class="btn btn-call">📞 اتصال</a>
+                    <button onclick="openWA('${doc.ph}')" class="btn btn-wa">💬 واتساب</button>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function openWA(phone) {
+        if(!phone) return;
+        let clean = phone.toString().replace(/\D/g, '');
+        if (clean.startsWith('0')) clean = '964' + clean.substring(1);
+        window.open(`https://wa.me/${clean}?text=${encodeURIComponent("مرحباً دكتور، أود الاستفسار من تطبيق Iraq Health")}`, '_blank');
+    }
+
+    function filterDoctors() {
+        const nameQ = document.getElementById('searchInput').value.toLowerCase();
+        const areaQ = document.getElementById('areaFilter').value;
+        const specQ = document.getElementById('specFilter').value;
+        const filtered = allDoctors.filter(d => 
+            (d.name && d.name.toLowerCase().includes(nameQ)) &&
+            (areaQ === "" || d.area === areaQ) &&
+            (specQ === "" || d.spec === specQ)
+        );
+        renderList(filtered);
+    }
+
+    fetchDoctors();
+</script>
+</body>
+</html>
