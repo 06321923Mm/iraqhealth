@@ -43,6 +43,8 @@ dependencies:
   firebase_analytics: ^11.0.0
   firebase_crashlytics: ^4.0.0
   firebase_messaging: ^15.0.0
+  http: ^1.2.0
+  package_info_plus: ^8.0.0
 
 dev_dependencies:
   flutter_test:

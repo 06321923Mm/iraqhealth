@@ -1,8 +1,12 @@
+import 'dart:convert';
+
 import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -368,10 +372,58 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   void initState() {
     super.initState();
     _searchController.addListener(_applyFilters);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _showDisclaimerIfNeeded();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _showDisclaimerIfNeeded();
+      if (mounted) _checkForUpdate();
     });
     _loadDoctors();
+  }
+
+  Future<void> _checkForUpdate() async {
+    if (kIsWeb) return;
+    try {
+      final http.Response response = await http
+          .get(Uri.parse('https://iraqhealth.net/version.json'))
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200 || !mounted) return;
+
+      final Map<String, dynamic> data =
+          jsonDecode(response.body) as Map<String, dynamic>;
+      final int remoteCode = (data['versionCode'] as num).toInt();
+      final String remoteUrl = data['url'] as String;
+      final String remoteName = data['versionName'] as String;
+
+      final PackageInfo info = await PackageInfo.fromPlatform();
+      final int localCode = int.tryParse(info.buildNumber) ?? 0;
+
+      if (remoteCode <= localCode || !mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext ctx) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text('تحديث متاح'),
+            content: Text('يوجد إصدار جديد ($remoteName) من المدار الطبي.\nيُنصح بالتحديث للحصول على أحدث البيانات والميزات.'),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('لاحقاً'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  Navigator.of(ctx).pop();
+                  final Uri uri = Uri.parse(remoteUrl);
+                  if (await canLaunchUrl(uri)) launchUrl(uri);
+                },
+                child: const Text('تحديث الآن'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } catch (_) {}
   }
 
   Future<void> _showDisclaimerIfNeeded() async {
