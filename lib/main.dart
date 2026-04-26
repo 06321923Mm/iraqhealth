@@ -466,14 +466,91 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     } catch (error, stackTrace) {
       debugPrint('Supabase doctors fetch error: $error');
       debugPrint('Supabase doctors fetch stackTrace: $stackTrace');
+      if (!mounted) return;
       setState(() {
-        _errorMessage = 'تعذر تحميل بيانات الأطباء حالياً.';
+        _errorMessage = _humanReadableLoadError(error);
       });
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
+  }
+
+  /// رسالة "قريباً" للمحافظات التي لا تحتوي على أطباء بعد.
+  Widget _buildGovernorateComingSoon() {
+    final String gove = _selectedGovernorate ?? 'هذه المحافظة';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            Container(
+              width: 96,
+              height: 96,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE3F2FD),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.access_time_rounded,
+                size: 52,
+                color: Color(0xFF42A5F5),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              'قريباً',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1D3557),
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'يتم العمل على إضافة أطباء محافظة $gove قريباً.\nانتظرونا!',
+              style: const TextStyle(
+                fontSize: 15,
+                height: 1.7,
+                color: Color(0xFF4A5568),
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 18),
+            FilledButton.tonalIcon(
+              onPressed: _isLoading ? null : _loadDoctors,
+              icon: const Icon(Icons.refresh),
+              label: const Text('تحديث'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// يحوّل أخطاء الشبكة/الـ Supabase إلى رسالة عربية مفهومة للمستخدم.
+  String _humanReadableLoadError(Object error) {
+    final String text = error.toString().toLowerCase();
+    final bool looksLikeNoInternet = text.contains('socketexception') ||
+        text.contains('failed host lookup') ||
+        text.contains('no address associated') ||
+        text.contains('network is unreachable') ||
+        text.contains('connection refused') ||
+        text.contains('clientexception') ||
+        text.contains('handshakeexception') ||
+        text.contains('timeout');
+    if (looksLikeNoInternet) {
+      return 'تعذر الاتصال بالإنترنت. تحقق من الاتصال وحاول مرة أخرى.';
+    }
+    if (error is PostgrestException) {
+      return 'تعذر تحميل بيانات الأطباء (خطأ في الخادم): ${error.message}';
+    }
+    return 'تعذر تحميل بيانات الأطباء حالياً. حاول مرة أخرى.';
   }
 
   Future<void> _upsertReportCount(int doctorId) async {
@@ -1043,20 +1120,42 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Text(
-                  _errorMessage!,
-                  style: const TextStyle(color: Color(0xFFB00020)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    Text(
+                      _errorMessage!,
+                      style: const TextStyle(color: Color(0xFFB00020)),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    Center(
+                      child: FilledButton.icon(
+                        onPressed: _isLoading ? null : _loadDoctors,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('إعادة المحاولة'),
+                      ),
+                    ),
+                  ],
                 ),
               ),
+            )
+          else if (_allDoctors.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: _buildGovernorateComingSoon(),
             )
           else if (_filteredDoctors.isEmpty)
             SliverFillRemaining(
               hasScrollBody: false,
               child: const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Text(
-                  'لا توجد نتائج مطابقة للفلاتر الحالية.',
-                  style: TextStyle(color: Color(0xFF4A5568)),
+                child: Center(
+                  child: Text(
+                    'لا توجد نتائج مطابقة للفلاتر الحالية.',
+                    style: TextStyle(color: Color(0xFF4A5568)),
+                    textAlign: TextAlign.center,
+                  ),
                 ),
               ),
             )
