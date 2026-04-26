@@ -1,3 +1,6 @@
+# Claude Code internal files
+.claude/
+
 # Miscellaneous
 *.class
 *.log
