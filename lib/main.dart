@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -51,55 +50,61 @@ enum _MedicalFieldType {
   lab,
 }
 
+/// قائمة التخصصات/الفئات المستخدمة في نموذج إضافة/تعديل العيادة.
+/// مرتّبة حسب التواجد الفعلي في قاعدة بيانات Supabase (الأكثر شيوعاً أولاً).
+/// يتم التحديث يدوياً من خلال مزامنة مع جدول public.doctors.
 const List<String> kPhysicianSpecializations = <String>[
-  'الباطنية والصدرية والقلبية',
-  'الباطنية - الجهاز الهضمي',
-  'الباطنية - أمراض الكلى',
-  'الباطنية - أمراض الدم',
-  'الباطنية - الأورام والغدد',
-  'الباطنية - غدد الصماء والسكري',
-  'الباطنية - اختصاص دقيق جهاز التنفسي والصدرية',
-  'القلبية',
-  'جراحة القلب والصدر والاوعية الدموية',
-  'اختصاص دقيق أيكو القلب والشرابي',
-  'قسطرة الشرابي والاوردة الاشعة التداخلية',
-  'اختصاص دقيق تشوهات القلب الولادية',
-  'الجراحة العامة الأطباء فقط',
-  'جراحة عامه الطبيبات فقط',
-  'الجراحة التجميلية',
-  'جراحة الجملة العصبية',
-  'جراحة الكسور والمفاصل',
-  'جراحة المجاري البولية',
-  'جراحة أطفال',
-  'طب وجراحة العيون',
-  'الانف والاذن والحنجرة',
+  'طب وتجميل الاسنان',
   'النسائية',
-  'اختصاص طب الأطفال',
-  'النفسية',
-  'طب الجملة العصبية',
-  'عيادات الفسلجة العصبية لتخطيط الاعصاب والعضلات والدماغ',
-  'أختصاص التخدير وطب الألم والعناية المركزة',
-  'الجلدية والتناسلية والتجميلية',
-  'طب الأسرة',
-  'طب المجتمع وطب عام',
+  'الباطنية',
+  'جراحة عامه',
+  'اختصاص الأطفال',
+  'الكسور و المفاصل',
+  'الاشعة والسونار',
+  'الجلدية و التجميلية',
+  'المختبرات الطبية',
+  'الاذن و الانف و الحنجرة',
+  'تخصصات اخرى',
+  'الصيدليات',
+  'طب وجراحة العيون',
+  'الجملة العصبية',
+  'عوينات لفحص البصر',
+  'القلبية',
+  'جراحة المجاري البولية',
+  'مراكز التجميل والليزر',
+  'المجمعات الطبية الخيرية',
+  'تجهيزات طبية',
+  'الباطنية - الأورام والغدد',
   'اختصاص التغذية',
-  'المفاصل',
-  'الطب الرياضي والعلاج التكميلي',
-  'الطب النووي والغدة الدرقية',
-  'السمع والنطق والتوازن',
-  'مراكز العقيم وأطفال الانابيب',
-  'مراكز لعلاج التوحد والنطق والتأتأة والقوقعة وتنمية القدرات',
-  'عيادات ومراكز العلاج الطبيعي والتأهيل الطبي',
-  'عيادات ومراكز لفحص هشاشة العظام',
-  'مراكز للأطراف والمساند الصناعية',
   'الممرضين',
+  'المستشفيات الاهلية في البصرة',
+  'الباطنية - غدد الصماء والسكري',
+  'النفسية',
+  'أختصاص التخدير',
+  'الباطنية - أمراض الدم',
+  'عيادات الفسلجة العصبية لتخطيط الاعصاب والعضلات والدماغ',
+  'الباطنية - أمراض الكلى',
+  'الباطنية - الجهاز الهضمي',
+  'مراكز العقيم وأطفال الانابيب',
+  'مراكز الطب النووي فحوصات البتا سكان',
 ];
 
+/// القيم القانونية (canonical) المخزّنة في عمود `spec` لتمييز فئات الأزرار
+/// السريعة في نموذج «إضافة/تعديل عيادة». تُستخدم في `_buildSpec()` و
+/// `_initSpec()` للحفاظ على تطابق الفئات مع قاعدة البيانات.
+const String kSpecDentistry = 'طب وتجميل الاسنان';
+const String kSpecPharmacy = 'الصيدليات';
+const String kSpecLaboratory = 'المختبرات الطبية';
+const String kSpecRadiology = 'الاشعة والسونار';
+
+/// خيارات نوع الأشعة عند اختيار «اشعة وسونار» في النموذج. القيمة الأولى هي
+/// القيمة القانونية الموجودة حالياً في قاعدة البيانات؛ تبقى الباقي للحفاظ على
+/// المرونة في التوسعة لاحقاً.
 const List<String> kImagingModalityOptions = <String>[
-  'اشعة وسونار',
-  'اشعة وسونار ورنين',
-  'اشعة وسونار ومفراس',
-  'اشعة وسونار ومفراس ورنين',
+  'الاشعة والسونار',
+  'الاشعة والسونار والرنين',
+  'الاشعة والسونار والمفراس',
+  'الاشعة والسونار والمفراس والرنين',
 ];
 
 const String _kAdminPasswordFromDefine =
@@ -202,48 +207,35 @@ String reportInsertErrorMessage(Object error) {
   return error.toString();
 }
 
+/// قائمة مناطق محافظة البصرة المستخدمة في نموذج إضافة/تعديل العيادة.
+/// مرتّبة وفق المناطق الموجودة فعلياً في قاعدة بيانات Supabase
+/// (المناطق الجغرافية فقط، دون أسماء المستشفيات).
 const List<String> kBasraAreas = <String>[
   'ابي الخصيب',
-  'الأربع شوارع',
-  'الاصمعي',
-  'البراضعية',
-  'البصرة القديمة',
+  'ام قصر',
   'التنومة',
-  'الجبيلة',
   'الجزائر',
   'الجزيرة',
   'الجمعيات',
   'الجمهورية',
   'الجنينة',
-  'الحكيمية',
   'الحيانية',
-  'الخليلية',
   'الدير',
   'الزبير',
-  'الطويسة',
   'العباسية',
   'العشار',
   'الفاو',
   'القبلة',
   'القرنة',
-  'الكرمة',
   'المدينة',
-  'المشرق الجديد',
-  'المطيحة',
-  'المعقل',
-  'النجيبية',
   'الهارثة',
-  'ام قصر',
   'بريهة',
-  'حي الأصدقاء',
   'خمسة ميل',
   'خور الزبير',
   'سفوان',
-  'شارع العسكري',
   'عشار',
   'كرمة علي',
   'مجمع الامل السكنية',
-  'ياسين خريبط',
 ];
 
 @pragma('vm:entry-point')
@@ -647,14 +639,18 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     final String searchTerm = _searchController.text.trim().toLowerCase();
 
     final List<Doctor> results = _allDoctors.where((Doctor doctor) {
+      // نُطبّق trim() دفاعياً تحسّباً لأي بيانات مستقبلية بفراغات زائدة، وذلك
+      // ليتطابق العرض في الـchips (الذي يستخدم القيم المقصوصة) مع نتيجة الفلتر.
+      final String docArea = doctor.area.trim();
+      final String docSpec = doctor.spec.trim();
       final bool matchesArea =
-          _selectedArea == null || doctor.area == _selectedArea;
-      final bool matchesSpecialization = _selectedSpecialization == null ||
-          doctor.spec == _selectedSpecialization;
+          _selectedArea == null || docArea == _selectedArea;
+      final bool matchesSpecialization =
+          _selectedSpecialization == null || docSpec == _selectedSpecialization;
       final bool matchesSearch = searchTerm.isEmpty ||
           doctor.name.toLowerCase().contains(searchTerm) ||
-          doctor.spec.toLowerCase().contains(searchTerm) ||
-          doctor.area.toLowerCase().contains(searchTerm);
+          docSpec.toLowerCase().contains(searchTerm) ||
+          docArea.toLowerCase().contains(searchTerm);
 
       return matchesArea && matchesSpecialization && matchesSearch;
     }).toList();
@@ -678,8 +674,10 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   bool _isIraqiDentalPracticeChipLabel(String spec) {
     final String normalized =
         spec.replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
-    return normalized.contains('طب الاسنان') ||
-        normalized.contains('طب الأسنان');
+    // يطابق التسميات العامة لطب الأسنان كما تظهر في قاعدة البيانات حالياً
+    // (مثل «طب وتجميل الاسنان») وكذلك الصيغ الكلاسيكية «طب الأسنان».
+    return normalized.contains('الاسنان') ||
+        normalized.contains('الأسنان');
   }
 
   Future<void> _openDialer(String phoneNumber) async {
@@ -1891,11 +1889,11 @@ class _AddClinicPageState extends State<AddClinicPage> {
         }
         return _selectedImagingType ?? '';
       case _MedicalFieldType.dentist:
-        return 'طبيب أسنان';
+        return kSpecDentistry;
       case _MedicalFieldType.pharmacy:
-        return 'صيدلية';
+        return kSpecPharmacy;
       case _MedicalFieldType.lab:
-        return 'مختبر';
+        return kSpecLaboratory;
     }
   }
 
@@ -3952,32 +3950,34 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
   }
 
   void _initSpec(String spec) {
-    if (spec.isEmpty) return;
-    if (spec == 'طبيب أسنان') {
+    final String trimmed = spec.trim();
+    if (trimmed.isEmpty) return;
+    if (trimmed == kSpecDentistry) {
       _medicalType = _MedicalFieldType.dentist;
-    } else if (spec == 'صيدلية') {
+    } else if (trimmed == kSpecPharmacy) {
       _medicalType = _MedicalFieldType.pharmacy;
-    } else if (spec == 'مختبر') {
+    } else if (trimmed == kSpecLaboratory) {
       _medicalType = _MedicalFieldType.lab;
-    } else if (kImagingModalityOptions.contains(spec)) {
+    } else if (kImagingModalityOptions.contains(trimmed)) {
       _medicalType = _MedicalFieldType.radiology;
-      _selectedImagingType = spec;
-    } else if (kPhysicianSpecializations.contains(spec)) {
+      _selectedImagingType = trimmed;
+    } else if (kPhysicianSpecializations.contains(trimmed)) {
       _medicalType = _MedicalFieldType.physician;
-      _selectedPhysicianSpec = spec;
+      _selectedPhysicianSpec = trimmed;
     } else {
       _medicalType = _MedicalFieldType.physician;
       _physicianUseCustom = true;
       _selectedPhysicianSpec = kDropdownAddCustom;
-      _physicianCustomCtrl.text = spec;
+      _physicianCustomCtrl.text = trimmed;
     }
   }
 
   void _initArea(String area, String gove) {
+    final String trimmedArea = area.trim();
     if (gove == 'البصرة') {
-      if (kBasraAreas.contains(area)) {
-        _selectedBasraArea = area;
-      } else if (area.isNotEmpty) {
+      if (kBasraAreas.contains(trimmedArea)) {
+        _selectedBasraArea = trimmedArea;
+      } else if (trimmedArea.isNotEmpty) {
         _basraUseCustomArea = true;
         _selectedBasraArea = kDropdownAddCustom;
         _basraCustomAreaCtrl.text = area;
@@ -4011,11 +4011,11 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
             ? _imagingCustomCtrl.text.trim()
             : _selectedImagingType ?? '';
       case _MedicalFieldType.dentist:
-        return 'طبيب أسنان';
+        return kSpecDentistry;
       case _MedicalFieldType.pharmacy:
-        return 'صيدلية';
+        return kSpecPharmacy;
       case _MedicalFieldType.lab:
-        return 'مختبر';
+        return kSpecLaboratory;
       case null:
         return '';
     }
@@ -4435,7 +4435,10 @@ class _SpecVisual {
   final IconData faIcon;
 
   static _SpecVisual forSpecialization(String spec) {
-    final String s = spec.toLowerCase().trim();
+    // نطبيع النص العربي: نزيل الهمزات لمطابقة الصيغ المختلفة (أنف/انف،
+    // أذن/اذن، أعصاب/اعصاب) ونحوّل تنوع الياء/الألف المقصورة، حتى تتطابق
+    // المفاتيح أدناه مع القيم الفعلية في قاعدة بيانات Supabase.
+    final String s = _normalizeArabicForMatch(spec);
 
     bool has(String a, String b) => s.contains(a) || s.contains(b);
 
@@ -4452,80 +4455,124 @@ class _SpecVisual {
         faIcon: FontAwesomeIcons.userDoctor,
       );
     }
+    if (has('صيدل', 'pharm') || has('دواء', 'drug')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF66BB6A), Color(0xFF1B5E20)],
+        faIcon: FontAwesomeIcons.prescriptionBottleMedical,
+      );
+    }
+    if (has('مختبر', 'lab') || has('فحوص', 'analyses')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF26A69A), Color(0xFF00695C)],
+        faIcon: FontAwesomeIcons.flaskVial,
+      );
+    }
+    if (has('نووي', 'nuclear') || has('بتا سكان', 'pet scan')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFFFFA726), Color(0xFFE65100)],
+        faIcon: FontAwesomeIcons.atom,
+      );
+    }
+    if (has('اشعة', 'radio') || has('سونار', 'ultrasound')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF26C6DA), Color(0xFF00838F)],
+        faIcon: FontAwesomeIcons.xRay,
+      );
+    }
+    if (has('ممرض', 'nurse')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFFEC407A), Color(0xFFAD1457)],
+        faIcon: FontAwesomeIcons.userNurse,
+      );
+    }
     if (has('قلب', 'cardio') || has('قسطرة', 'angio')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFFEF5350), Color(0xFFC62828)],
         faIcon: FontAwesomeIcons.heartPulse,
       );
     }
-    if (has('عيون', 'ophthal') || has('بصريات', 'optom')) {
+    if (has('عيون', 'ophthal') ||
+        has('بصر', 'optom') ||
+        has('عوينات', 'glasses')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF42A5F5), Color(0xFF1565C0)],
         faIcon: FontAwesomeIcons.eye,
       );
     }
-    if (has('أنف', 'ent') ||
-        has('أذن', 'hns') ||
-        has('حنجرة', 'laryng')) {
+    if (has('انف', 'ent') || has('اذن', 'hns') || has('حنجرة', 'laryng')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF7E57C2), Color(0xFF4527A0)],
         faIcon: FontAwesomeIcons.earListen,
       );
     }
-    if (has('مخ', 'neuro') || has('أعصاب', 'nerve')) {
+    if (has('مخ', 'neuro') ||
+        has('اعصاب', 'nerve') ||
+        has('عصبي', 'neural') ||
+        has('دماغ', 'brain')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFFAB47BC), Color(0xFF6A1B9A)],
         faIcon: FontAwesomeIcons.brain,
       );
     }
-    if (has('عظام', 'ortho') || has('مفاصل', 'joint')) {
+    if (has('عظام', 'ortho') ||
+        has('مفاصل', 'joint') ||
+        has('كسور', 'fracture')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFFFFB74D), Color(0xFFEF6C00)],
         faIcon: FontAwesomeIcons.bone,
       );
     }
-    if (has('أطفال', 'pediat') || has('حديثي الولادة', 'neonat')) {
+    if (has('اطفال', 'pediat') || has('حديثي الولادة', 'neonat')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF66BB6A), Color(0xFF2E7D32)],
         faIcon: FontAwesomeIcons.baby,
       );
     }
-    if (has('نساء', 'gyn') ||
+    if (has('نسائ', 'gyn') ||
         has('توليد', 'obstet') ||
-        has('ولادة', 'matern')) {
+        has('ولادة', 'matern') ||
+        has('عقيم', 'fertil')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFFEC407A), Color(0xFFAD1457)],
         faIcon: FontAwesomeIcons.personPregnant,
       );
     }
-    if (has('جلد', 'derma')) {
+    if (has('جلد', 'derma') || has('ليزر', 'laser') || has('تجميل', 'cosmet')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF29B6F6), Color(0xFF0277BD)],
         faIcon: FontAwesomeIcons.handSparkles,
       );
     }
-    if (has('صدر', 'chest') || has('رئة', 'pulm')) {
+    if (has('صدر', 'chest') || has('رئة', 'pulm') || has('تنفس', 'respir')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF4FC3F7), Color(0xFF0277BD)],
         faIcon: FontAwesomeIcons.lungs,
       );
     }
-    if (has('كلى', 'nephro') || has('مسالك', 'urolog')) {
+    if (has('كلى', 'nephro') ||
+        has('مسالك', 'urolog') ||
+        has('بولي', 'urinary') ||
+        has('مجاري', 'tract')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF5C6BC0), Color(0xFF283593)],
         faIcon: FontAwesomeIcons.handHoldingMedical,
       );
     }
-    if (has('باطن', 'intern') || has('سكر', 'diabet') || has('غدد', 'endocr')) {
+    if (has('تغذية', 'nutrit')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF8BC34A), Color(0xFF558B2F)],
+        faIcon: FontAwesomeIcons.appleWhole,
+      );
+    }
+    if (has('باطن', 'intern') ||
+        has('سكر', 'diabet') ||
+        has('غدد', 'endocr') ||
+        has('هضم', 'gastro') ||
+        has('اورام', 'oncol') ||
+        has('دم', 'blood')) {
       return const _SpecVisual(
         gradientColors: <Color>[Color(0xFF26A69A), Color(0xFF00695C)],
         faIcon: FontAwesomeIcons.notesMedical,
-      );
-    }
-    if (has('جراح', 'surg') || has('عمليات', 'operation')) {
-      return const _SpecVisual(
-        gradientColors: <Color>[Color(0xFF78909C), Color(0xFF37474F)],
-        faIcon: FontAwesomeIcons.userDoctor,
       );
     }
     if (has('تخدير', 'anesth')) {
@@ -4540,11 +4587,46 @@ class _SpecVisual {
         faIcon: FontAwesomeIcons.brain,
       );
     }
+    if (has('جراح', 'surg') || has('عمليات', 'operation')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF78909C), Color(0xFF37474F)],
+        faIcon: FontAwesomeIcons.userDoctor,
+      );
+    }
+    if (has('مستشفى', 'hospital') || has('مستشفيات', 'hospitals')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF42A5F5), Color(0xFF1565C0)],
+        faIcon: FontAwesomeIcons.hospital,
+      );
+    }
+    if (has('مجمع', 'complex') || has('خيري', 'charity')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF7E57C2), Color(0xFF4527A0)],
+        faIcon: FontAwesomeIcons.handHoldingHeart,
+      );
+    }
+    if (has('تجهيز', 'equipment') || has('مساند', 'assist')) {
+      return const _SpecVisual(
+        gradientColors: <Color>[Color(0xFF78909C), Color(0xFF37474F)],
+        faIcon: FontAwesomeIcons.briefcaseMedical,
+      );
+    }
 
     return const _SpecVisual(
       gradientColors: <Color>[Color(0xFF64B5F6), Color(0xFF1E88E5)],
       faIcon: FontAwesomeIcons.userDoctor,
     );
+  }
+
+  /// نُطبيع النص العربي: lowercase + trim + توحيد همزات الألف، حتى تتطابق
+  /// المفاتيح أعلاه (كـ «انف») مع القيم الفعلية في قاعدة البيانات سواء كانت
+  /// «أنف» أو «الانف» أو «إنف». ملاحظة: لا نُحوّل ى→ي ولا ة→ه لتفادي كسر
+  /// مفاتيح كـ «كلى» أو «حنجرة» أو «ولادة».
+  static String _normalizeArabicForMatch(String spec) {
+    return spec
+        .toLowerCase()
+        .trim()
+        .replaceAll(RegExp('[أإآ]'), 'ا');
   }
 
   /// أيقونة السن فقط عند وجود «أسنان»/إنجليزي dental، وليس لتسمية «طب الأسنان» العامة.
