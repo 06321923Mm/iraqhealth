@@ -50,7 +50,11 @@ app.*.map.json
 *.jks
 *.keystore
 android/key.properties
+android/local.properties
 
 # Firebase config — contains API keys, keep private
 android/app/google-services.json
 ios/Runner/GoogleService-Info.plist
+
+# Node tooling (geocode script)
+tools/geocode-doctors/node_modules/

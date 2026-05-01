@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
@@ -15,7 +16,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'analytics_service.dart';
 import 'app_navigation.dart';
+import 'doctor_location_repository.dart';
+import 'doctor_model.dart';
+import 'location_picker_screen.dart';
 import 'arabic_search_normalize.dart';
 import 'favorites_provider.dart';
 import 'search_suggestions.dart';
@@ -256,7 +261,14 @@ Future<void> main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-    FlutterError.onError = FirebaseCrashlytics.instance.recordFlutterFatalError;
+    await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
+    FlutterError.onError = (FlutterErrorDetails details) {
+      FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+    };
+    PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+      FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+      return true;
+    };
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
     await FirebaseMessaging.instance.requestPermission();
   }
@@ -375,6 +387,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   /// 0: الرئيسية، 1: أطبائي (المفضلة).
   int _homeNavIndex = 0;
   Timer? _suggestionDebounceTimer;
+  Timer? _searchAnalyticsDebounceTimer;
   List<SearchSuggestionRow> _searchSuggestions = <SearchSuggestionRow>[];
 
   static const List<String> _kPopularSearchSpecs = <String>[
@@ -488,7 +501,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       while (true) {
         final List<dynamic> response = await _supabase
             .from(kSupabaseDoctorsTable)
-            .select('id, spec, name, addr, area, ph, ph2, notes, gove')
+            .select('id, spec, name, addr, area, ph, ph2, notes, gove, lat, lng')
 .eq('gove', _selectedGovernorate ?? 'البصرة')
 .order('id', ascending: true)
             .range(from, from + _batchSize - 1);
@@ -661,6 +674,17 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   void _onSearchTextChanged() {
     _applyFilters();
+    _searchAnalyticsDebounceTimer?.cancel();
+    _searchAnalyticsDebounceTimer =
+        Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted) {
+        return;
+      }
+      final String q = _searchController.text.trim();
+      if (q.length >= 2) {
+        unawaited(AnalyticsService.instance.logSearchUsed(q));
+      }
+    });
     _suggestionDebounceTimer?.cancel();
     _suggestionDebounceTimer = Timer(const Duration(milliseconds: 320), () {
       if (!mounted) {
@@ -684,6 +708,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   void _applySuggestionRow(SearchSuggestionRow row) {
+    _searchAnalyticsDebounceTimer?.cancel();
+    unawaited(AnalyticsService.instance.logSearchUsed(row.label));
     _searchController.text = row.label;
     _searchController.selection =
         TextSelection.collapsed(offset: row.label.length);
@@ -692,6 +718,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   void _resetSearchAndFilters() {
+    unawaited(AnalyticsService.instance.logFilterUsed('reset'));
     setState(() {
       _searchController.clear();
       _selectedArea = null;
@@ -702,6 +729,10 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   void _applyPopularSpecChip(String specLabel) {
+    unawaited(
+      AnalyticsService.instance
+          .logFilterUsed('popular_spec', value: specLabel),
+    );
     setState(() {
       _selectedSpecialization = specLabel;
       _searchController.clear();
@@ -763,19 +794,31 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         normalized.contains('الأسنان');
   }
 
-  Future<void> _openDialer(String phoneNumber) async {
+  Future<void> _openDialer(
+    String phoneNumber, {
+    String doctorName = '',
+  }) async {
     final String cleaned = _normalizePhone(phoneNumber);
     if (cleaned.isEmpty) {
       return;
+    }
+    if (doctorName.isNotEmpty) {
+      unawaited(AnalyticsService.instance.logCallClicked(doctorName));
     }
     final Uri uri = Uri.parse('tel:$cleaned');
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  Future<void> _openWhatsApp(String phoneNumber) async {
+  Future<void> _openWhatsApp(
+    String phoneNumber, {
+    String doctorName = '',
+  }) async {
     final String cleaned = _normalizePhone(phoneNumber);
     if (cleaned.isEmpty) {
       return;
+    }
+    if (doctorName.isNotEmpty) {
+      unawaited(AnalyticsService.instance.logWhatsappClicked(doctorName));
     }
     final String withoutLeadingZero =
         cleaned.startsWith('0') ? cleaned.substring(1) : cleaned;
@@ -783,9 +826,20 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  Future<void> _openMap(String address) async {
+  Future<void> _openMap(
+    String address, {
+    String locationDetail = '',
+  }) async {
     if (address.trim().isEmpty) {
       return;
+    }
+    if (!kIsWeb) {
+      unawaited(
+        AnalyticsService.instance.logLocationUsed(
+          'address_text',
+          detail: locationDetail,
+        ),
+      );
     }
     final String value = address.trim();
     final bool isDirectMapLink =
@@ -795,6 +849,25 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         : Uri.parse(
             'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(value)}',
           );
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  Future<void> _openGoogleMapsLatLng(
+    double lat,
+    double lng, {
+    String locationDetail = '',
+  }) async {
+    if (!kIsWeb) {
+      unawaited(
+        AnalyticsService.instance.logLocationUsed(
+          'coordinates',
+          detail: locationDetail,
+        ),
+      );
+    }
+    final Uri uri = Uri.parse(
+      'https://www.google.com/maps/search/?api=1&query=$lat,$lng',
+    );
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
@@ -868,8 +941,14 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   void _showDoctorDetails(BuildContext context, Doctor doctor) {
+    final String displayName =
+        doctor.name.isNotEmpty ? doctor.name : 'غير معروف';
+    unawaited(
+      AnalyticsService.instance.logDoctorOpened(displayName, doctor.spec),
+    );
     final String primaryPhone =
         doctor.ph.trim().isNotEmpty ? doctor.ph.trim() : doctor.ph2.trim();
+    final List<Doctor> docHolder = <Doctor>[doctor];
 
     showModalBottomSheet<void>(
       context: context,
@@ -880,90 +959,226 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (BuildContext ctx) {
-        return Directionality(
-          textDirection: TextDirection.rtl,
-          child: Padding(
-            padding: EdgeInsets.only(
-              left: 20,
-              right: 20,
-              top: 8,
-              bottom: MediaQuery.paddingOf(ctx).bottom + 20,
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  Center(child: _buildSpecAvatar(doctor, radius: 44)),
-                  const SizedBox(height: 16),
-                  Text(
-                    doctor.name.isNotEmpty ? doctor.name : '-',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF1D3557),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  _detailField('التخصص', doctor.spec),
-                  _detailField('المنطقة', doctor.area),
-                  _detailField('العنوان', doctor.addr),
-                  _detailField('الهاتف الأول', doctor.ph),
-                  _detailField('الهاتف الثاني', doctor.ph2),
-                  _detailField('ملاحظات', doctor.notes),
-                  _detailField('رقم السجل', doctor.id > 0 ? '${doctor.id}' : ''),
-                  const SizedBox(height: 16),
-                  Row(
+        return StatefulBuilder(
+          builder: (BuildContext bctx, void Function(void Function()) setModal) {
+            final Doctor d = docHolder[0];
+            return Directionality(
+              textDirection: TextDirection.rtl,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 20,
+                  right: 20,
+                  top: 8,
+                  bottom: MediaQuery.paddingOf(bctx).bottom + 20,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: primaryPhone.isEmpty
-                              ? null
-                              : () {
-                                  Navigator.pop(ctx);
-                                  _openDialer(primaryPhone);
-                                },
-                          icon: const Icon(Icons.call_outlined),
-                          label: const Text('اتصال'),
+                      Center(child: _buildSpecAvatar(d, radius: 44)),
+                      const SizedBox(height: 16),
+                      Text(
+                        d.name.isNotEmpty ? d.name : '-',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF1D3557),
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FilledButton.tonalIcon(
-                          onPressed: primaryPhone.isEmpty
-                              ? null
-                              : () {
-                                  Navigator.pop(ctx);
-                                  _openWhatsApp(primaryPhone);
-                                },
-                          icon: FaIcon(
-                            FontAwesomeIcons.whatsapp,
-                            size: 20,
-                            color: const Color(0xFF25D366),
-                          ),
-                          label: const Text('واتساب'),
+                      const SizedBox(height: 20),
+                      _detailField('التخصص', d.spec),
+                      _detailField('المنطقة', d.area),
+                      _detailField('العنوان', d.addr),
+                      if (d.hasCoordinates)
+                        _detailField(
+                          'الإحداثيات',
+                          '${d.lat!.toStringAsFixed(5)}, ${d.lng!.toStringAsFixed(5)}',
                         ),
+                      _detailField('الهاتف الأول', d.ph),
+                      _detailField('الهاتف الثاني', d.ph2),
+                      _detailField('ملاحظات', d.notes),
+                      _detailField('رقم السجل', d.id > 0 ? '${d.id}' : ''),
+                      if (d.id > 0) ...<Widget>[
+                        const SizedBox(height: 16),
+                        const Text(
+                          'هل موقع العيادة على الخريطة صحيح؟',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1D3557),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: <Widget>[
+                            Expanded(
+                              child: FilledButton.tonal(
+                                onPressed: () async {
+                                  try {
+                                    await DoctorLocationRepository.instance
+                                        .recordLocationConfirmation(
+                                      _supabase,
+                                      d.id,
+                                    );
+                                    if (bctx.mounted) {
+                                      ScaffoldMessenger.of(bctx).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('شكراً لتأكيد الموقع'),
+                                        ),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (bctx.mounted) {
+                                      ScaffoldMessenger.of(bctx).showSnackBar(
+                                        SnackBar(
+                                          content: Text('تعذر التسجيل: $e'),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                                child: const Text('نعم 👍'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () async {
+                                  final LocationPickResult? picked =
+                                      await Navigator.of(bctx)
+                                          .push<LocationPickResult>(
+                                    MaterialPageRoute<LocationPickResult>(
+                                      builder: (BuildContext _) =>
+                                          LocationPickerScreen(
+                                        initialLatitude: d.lat ?? 30.5039,
+                                        initialLongitude: d.lng ?? 47.7806,
+                                        title: 'تصحيح موقع العيادة',
+                                      ),
+                                    ),
+                                  );
+                                  if (picked == null || !bctx.mounted) {
+                                    return;
+                                  }
+                                  try {
+                                    await DoctorLocationRepository.instance
+                                        .submitLocationCorrection(
+                                      _supabase,
+                                      doctorId: d.id,
+                                      lat: picked.latitude,
+                                      lng: picked.longitude,
+                                    );
+                                    docHolder[0] = d.withLatLng(
+                                      picked.latitude,
+                                      picked.longitude,
+                                    );
+                                    setModal(() {});
+                                    if (bctx.mounted) {
+                                      ScaffoldMessenger.of(bctx).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'تم حفظ الموقع المُصحَّح. شكراً لك.',
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (bctx.mounted) {
+                                      ScaffoldMessenger.of(bctx).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'تعذر الحفظ: $e',
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                                child: const Text('لا ❌'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 16),
+                      Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: primaryPhone.isEmpty
+                                  ? null
+                                  : () {
+                                      Navigator.pop(ctx);
+                                      _openDialer(
+                                        primaryPhone,
+                                        doctorName: displayName,
+                                      );
+                                    },
+                              icon: const Icon(Icons.call_outlined),
+                              label: const Text('اتصال'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FilledButton.tonalIcon(
+                              onPressed: primaryPhone.isEmpty
+                                  ? null
+                                  : () {
+                                      Navigator.pop(ctx);
+                                      _openWhatsApp(
+                                        primaryPhone,
+                                        doctorName: displayName,
+                                      );
+                                    },
+                              icon: FaIcon(
+                                FontAwesomeIcons.whatsapp,
+                                size: 20,
+                                color: const Color(0xFF25D366),
+                              ),
+                              label: const Text('واتساب'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (d.hasCoordinates)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: OutlinedButton.icon(
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              unawaited(
+                                _openGoogleMapsLatLng(
+                                  d.lat!,
+                                  d.lng!,
+                                  locationDetail: displayName,
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.map_outlined),
+                            label: const Text('فتح في خرائط Google (إحداثيات)'),
+                          ),
+                        ),
+                      OutlinedButton.icon(
+                        onPressed: d.addr.trim().isEmpty
+                            ? null
+                            : () {
+                                Navigator.pop(ctx);
+                                _openMap(
+                                  d.addr,
+                                  locationDetail: displayName,
+                                );
+                              },
+                        icon: const Icon(Icons.place_rounded),
+                        label: const Text('فتح الموقع على الخرائط (النص)'),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: doctor.addr.trim().isEmpty
-                          ? null
-                          : () {
-                              Navigator.pop(ctx);
-                              _openMap(doctor.addr);
-                            },
-                      icon: const Icon(Icons.place_rounded),
-                      label: const Text('فتح الموقع على الخرائط'),
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
@@ -1101,6 +1316,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   @override
   void dispose() {
     _suggestionDebounceTimer?.cancel();
+    _searchAnalyticsDebounceTimer?.cancel();
     _searchController.removeListener(_onSearchTextChanged);
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
@@ -1189,6 +1405,24 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                   _searchFieldVisible ? Icons.close : Icons.search,
                 ),
               ),
+              if (kDebugMode && !kIsWeb)
+                PopupMenuButton<String>(
+                  tooltip: 'أدوات التطوير',
+                  icon: const Icon(Icons.bug_report_outlined),
+                  onSelected: (String value) {
+                    if (value == 'crash') {
+                      FirebaseCrashlytics.instance.crash();
+                    }
+                  },
+                  itemBuilder: (BuildContext context) {
+                    return <PopupMenuEntry<String>>[
+                      const PopupMenuItem<String>(
+                        value: 'crash',
+                        child: Text('تعطّل التطبيق — اختبار Crashlytics'),
+                      ),
+                    ];
+                  },
+                ),
             ],
             expandedHeight: 202,
             flexibleSpace: FlexibleSpaceBar(
@@ -1598,6 +1832,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
               value: _selectedGovernorate,
               items: kGovernorates,
               onChanged: (String? value) {
+                if (value != null) {
+                  unawaited(
+                    AnalyticsService.instance
+                        .logFilterUsed('governorate', value: value),
+                  );
+                }
                 setState(() {
                   _selectedGovernorate = value;
                 });
@@ -1672,6 +1912,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         ),
       ],
       onChanged: (String? value) {
+        unawaited(
+          AnalyticsService.instance.logFilterUsed(
+            'area',
+            value: value ?? 'all',
+          ),
+        );
         setState(() {
           _selectedArea = value;
         });
@@ -1721,6 +1967,10 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                     selected: _selectedSpecialization == null,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     onSelected: (_) {
+                      unawaited(
+                        AnalyticsService.instance
+                            .logFilterUsed('specialization', value: 'all'),
+                      );
                       setState(() {
                         _selectedSpecialization = null;
                       });
@@ -1742,9 +1992,16 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                       selected: isSelected,
                       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       onSelected: (_) {
+                        final String? next =
+                            isSelected ? null : specialization;
+                        unawaited(
+                          AnalyticsService.instance.logFilterUsed(
+                            'specialization',
+                            value: next ?? 'all',
+                          ),
+                        );
                         setState(() {
-                          _selectedSpecialization =
-                              isSelected ? null : specialization;
+                          _selectedSpecialization = next;
                         });
                         _applyFilters();
                       },
@@ -1882,7 +2139,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                               IconButton(
                                 onPressed: primaryPhone.isEmpty
                                     ? null
-                                    : () => _openWhatsApp(primaryPhone),
+                                    : () => _openWhatsApp(
+                                          primaryPhone,
+                                          doctorName: doctor.name.isNotEmpty
+                                              ? doctor.name
+                                              : 'غير معروف',
+                                        ),
                                 icon: const FaIcon(
                                   FontAwesomeIcons.whatsapp,
                                   size: 18,
@@ -1899,9 +2161,22 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                                 ),
                               ),
                               IconButton(
-                                onPressed: doctor.addr.trim().isEmpty
-                                    ? null
-                                    : () => _openMap(doctor.addr),
+                                onPressed: (doctor.hasCoordinates || doctor.addr.trim().isNotEmpty)
+                                    ? () {
+                                        if (doctor.hasCoordinates) {
+                                          unawaited(_openGoogleMapsLatLng(
+                                            doctor.lat!,
+                                            doctor.lng!,
+                                            locationDetail: doctor.name,
+                                          ));
+                                        } else {
+                                          _openMap(
+                                            doctor.addr,
+                                            locationDetail: doctor.name,
+                                          );
+                                        }
+                                      }
+                                    : null,
                                 icon: Icon(
                                   Icons.add_location_alt_rounded,
                                   size: 20,
@@ -1920,7 +2195,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                               IconButton(
                                 onPressed: primaryPhone.isEmpty
                                     ? null
-                                    : () => _openDialer(primaryPhone),
+                                    : () => _openDialer(
+                                          primaryPhone,
+                                          doctorName: doctor.name.isNotEmpty
+                                              ? doctor.name
+                                              : 'غير معروف',
+                                        ),
                                 icon: const Icon(
                                   Icons.call_outlined,
                                   size: 20,
@@ -5167,40 +5447,5 @@ class _SpecVisual {
       return true;
     }
     return false;
-  }
-}
-
-class Doctor {
-  const Doctor({
-    required this.id,
-    required this.spec,
-    required this.name,
-    required this.addr,
-    required this.area,
-    required this.ph,
-    required this.ph2,
-    required this.notes,
-  });
-
-  final int id;
-  final String spec;
-  final String name;
-  final String addr;
-  final String area;
-  final String ph;
-  final String ph2;
-  final String notes;
-
-  factory Doctor.fromJson(Map<String, dynamic> json) {
-    return Doctor(
-      id: json['id'] is int ? json['id'] as int : 0,
-      spec: (json['spec'] ?? '').toString(),
-      name: (json['name'] ?? '').toString(),
-      addr: (json['addr'] ?? '').toString(),
-      area: (json['area'] ?? '').toString(),
-      ph: (json['ph'] ?? '').toString(),
-      ph2: (json['ph2'] ?? '').toString(),
-      notes: (json['notes'] ?? '').toString(),
-    );
   }
 }
