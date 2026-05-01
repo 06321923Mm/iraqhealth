@@ -22,6 +22,24 @@
 <body>
   <script src="flutter_bootstrap.js" async></script>
 
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+    import { getAnalytics }   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-analytics.js";
+
+    const firebaseConfig = {
+      apiKey:            "AIzaSyBI1aJOsgX9bfsT7NNO4vXaP0DospW0JpQ",
+      authDomain:        "iraqhealth-b08f6.firebaseapp.com",
+      projectId:         "iraqhealth-b08f6",
+      storageBucket:     "iraqhealth-b08f6.firebasestorage.app",
+      messagingSenderId: "63970501606",
+      appId:             "1:63970501606:web:f13f9990483dee8b50ec27",
+      measurementId:     "G-P3F5TRGJFY",
+    };
+
+    const app = initializeApp(firebaseConfig);
+    getAnalytics(app);
+  </script>
+
   <script>
     var _pwaPrompt = null;
 

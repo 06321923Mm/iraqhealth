@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:firebase_core/firebase_core.dart';
@@ -9,10 +10,15 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'app_navigation.dart';
+import 'arabic_search_normalize.dart';
+import 'favorites_provider.dart';
+import 'search_suggestions.dart';
 import 'firebase_options.dart';
 import 'pwa_install_stub.dart'
     if (dart.library.js) 'pwa_install_web.dart';
@@ -261,7 +267,12 @@ Future<void> main() async {
         'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5Z3VqZWJuZ2l3ZW13dWpqY2dtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3Njg1MjAsImV4cCI6MjA5MTM0NDUyMH0.p9hhJZ8L45ZqwQKuq5TCPWEa2xxBNl0AqHPQUjP1Xvs',
   );
 
-  runApp(const IraqHealthApp());
+  runApp(
+    ChangeNotifierProvider<FavoritesProvider>(
+      create: (_) => FavoritesProvider(),
+      child: const IraqHealthApp(),
+    ),
+  );
 }
 
 class IraqHealthApp extends StatelessWidget {
@@ -285,25 +296,13 @@ class IraqHealthApp extends StatelessWidget {
           primary: primaryMedicalBlue,
           surface: Colors.white,
         ),
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: <TargetPlatform, PageTransitionsBuilder>{
+            TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+          },
+        ),
       ),
-      routes: <String, WidgetBuilder>{
-        '/add-clinic': (_) => const Directionality(
-              textDirection: TextDirection.rtl,
-              child: AddClinicPage(),
-            ),
-        '/report': (_) => const Directionality(
-              textDirection: TextDirection.rtl,
-              child: ReportPage(),
-            ),
-        '/admin': (BuildContext ctx) {
-          final bool fromHomeBypass =
-              ModalRoute.of(ctx)?.settings.arguments == true;
-          return Directionality(
-            textDirection: TextDirection.rtl,
-            child: AdminDashboardPage(autoAuthenticated: fromHomeBypass),
-          );
-        },
-      },
       onGenerateRoute: (RouteSettings settings) {
         if (settings.name == '/home') {
           return PageRouteBuilder<dynamic>(
@@ -322,6 +321,18 @@ class IraqHealthApp extends StatelessWidget {
                 Widget child) {
               return FadeTransition(opacity: anim, child: child);
             },
+          );
+        }
+        if (settings.name == '/add-clinic') {
+          return buildAdaptiveRtlRoute<Object?>(const AddClinicPage());
+        }
+        if (settings.name == '/report') {
+          return buildAdaptiveRtlRoute<Object?>(const ReportPage());
+        }
+        if (settings.name == '/admin') {
+          final bool fromHomeBypass = settings.arguments == true;
+          return buildAdaptiveRtlRoute<Object?>(
+            AdminDashboardPage(autoAuthenticated: fromHomeBypass),
           );
         }
         return null;
@@ -360,10 +371,23 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   List<String> _areas = <String>[];
   List<String> _specializations = <String>[];
   int _adminTapCounter = 0;
+
+  /// 0: الرئيسية، 1: أطبائي (المفضلة).
+  int _homeNavIndex = 0;
+  Timer? _suggestionDebounceTimer;
+  List<SearchSuggestionRow> _searchSuggestions = <SearchSuggestionRow>[];
+
+  static const List<String> _kPopularSearchSpecs = <String>[
+    'القلبية',
+    'اختصاص الأطفال',
+    'الاشعة والسونار',
+  ];
+
   @override
   void initState() {
     super.initState();
-    _searchController.addListener(_applyFilters);
+    _searchController.addListener(_onSearchTextChanged);
+    _searchFocusNode.addListener(_onSearchFocusChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _showDisclaimerIfNeeded();
       if (mounted) _checkForUpdate();
@@ -635,8 +659,59 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     }
   }
 
+  void _onSearchTextChanged() {
+    _applyFilters();
+    _suggestionDebounceTimer?.cancel();
+    _suggestionDebounceTimer = Timer(const Duration(milliseconds: 320), () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _searchSuggestions = computeLocalSearchSuggestions(
+          query: _searchController.text,
+          doctorNames: _allDoctors.map((Doctor d) => d.name).toList(),
+          areas: _areas,
+          specializations: _specializations,
+        );
+      });
+    });
+  }
+
+  void _onSearchFocusChanged() {
+    if (!_searchFocusNode.hasFocus) {
+      setState(() => _searchSuggestions = <SearchSuggestionRow>[]);
+    }
+  }
+
+  void _applySuggestionRow(SearchSuggestionRow row) {
+    _searchController.text = row.label;
+    _searchController.selection =
+        TextSelection.collapsed(offset: row.label.length);
+    setState(() => _searchSuggestions = <SearchSuggestionRow>[]);
+    _applyFilters();
+  }
+
+  void _resetSearchAndFilters() {
+    setState(() {
+      _searchController.clear();
+      _selectedArea = null;
+      _selectedSpecialization = null;
+      _searchSuggestions = <SearchSuggestionRow>[];
+    });
+    _applyFilters();
+  }
+
+  void _applyPopularSpecChip(String specLabel) {
+    setState(() {
+      _selectedSpecialization = specLabel;
+      _searchController.clear();
+      _searchSuggestions = <SearchSuggestionRow>[];
+    });
+    _applyFilters();
+  }
+
   void _applyFilters() {
-    final String searchTerm = _searchController.text.trim().toLowerCase();
+    final List<String> searchTokens = arabicSearchTokens(_searchController.text);
 
     final List<Doctor> results = _allDoctors.where((Doctor doctor) {
       // نُطبّق trim() دفاعياً تحسّباً لأي بيانات مستقبلية بفراغات زائدة، وذلك
@@ -647,10 +722,18 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
           _selectedArea == null || docArea == _selectedArea;
       final bool matchesSpecialization =
           _selectedSpecialization == null || docSpec == _selectedSpecialization;
-      final bool matchesSearch = searchTerm.isEmpty ||
-          doctor.name.toLowerCase().contains(searchTerm) ||
-          docSpec.toLowerCase().contains(searchTerm) ||
-          docArea.toLowerCase().contains(searchTerm);
+      final String normName = normalizeArabic(doctor.name);
+      final String normSpec = normalizeArabic(docSpec);
+      final String normArea = normalizeArabic(docArea);
+      final String normAddr = normalizeArabic(doctor.addr.trim());
+      final bool matchesSearch = searchTokens.isEmpty ||
+          searchTokens.every(
+            (String t) =>
+                normName.contains(t) ||
+                normSpec.contains(t) ||
+                normArea.contains(t) ||
+                normAddr.contains(t),
+          );
 
       return matchesArea && matchesSpecialization && matchesSearch;
     }).toList();
@@ -1017,6 +1100,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   @override
   void dispose() {
+    _suggestionDebounceTimer?.cancel();
+    _searchController.removeListener(_onSearchTextChanged);
+    _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
@@ -1026,18 +1112,47 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   Widget build(BuildContext context) {
     const Color primaryMedicalBlue = Color(0xFF42A5F5);
     const Color sectionShadow = Color(0x1A000000);
+    final double listBottomInset =
+        MediaQuery.paddingOf(context).bottom + 88 + 56;
 
     return Scaffold(
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => Navigator.pushNamed(context, '/add-clinic'),
-        tooltip: 'إضافة عيادة',
-        backgroundColor: primaryMedicalBlue,
-        foregroundColor: Colors.white,
-        child: const Icon(Icons.add),
-      ),
+      floatingActionButton: _homeNavIndex == 0
+          ? FloatingActionButton(
+              onPressed: () => Navigator.pushNamed(context, '/add-clinic'),
+              tooltip: 'إضافة عيادة',
+              backgroundColor: primaryMedicalBlue,
+              foregroundColor: Colors.white,
+              child: const Icon(Icons.add),
+            )
+          : null,
       // في RTL تكون "البداية" يمين الشاشة — موضع مريح للإبهام.
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
-      body: CustomScrollView(
+      bottomNavigationBar: NavigationBar(
+        height: 64,
+        selectedIndex: _homeNavIndex,
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        indicatorColor: primaryMedicalBlue.withValues(alpha: 0.2),
+        onDestinationSelected: (int index) {
+          setState(() => _homeNavIndex = index);
+        },
+        destinations: const <NavigationDestination>[
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home_rounded),
+            label: 'الرئيسية',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.favorite_border_rounded),
+            selectedIcon: Icon(Icons.favorite_rounded),
+            label: 'أطبائي',
+          ),
+        ],
+      ),
+      body: IndexedStack(
+        index: _homeNavIndex,
+        children: <Widget>[
+          CustomScrollView(
         slivers: <Widget>[
           SliverAppBar(
             pinned: true,
@@ -1126,36 +1241,89 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                         8,
                       ),
                       child: Material(
-                        color: Colors.transparent,
-                        child: TextField(
-                          controller: _searchController,
-                          focusNode: _searchFocusNode,
-                          onChanged: (_) => _applyFilters(),
-                          decoration: InputDecoration(
-                            hintText: 'ابحث عن طبيب أو تخصص',
-                            filled: true,
-                            fillColor: const Color(0xFFEEEEEE),
-                            isDense: true,
-                            prefixIcon: const Icon(Icons.search, size: 22),
-                            suffixIcon: IconButton(
-                              tooltip: 'إغلاق',
-                              onPressed: () {
-                                setState(() {
-                                  _searchFieldVisible = false;
-                                });
-                                _searchFocusNode.unfocus();
-                              },
-                              icon: const Icon(Icons.close),
+                        elevation: 2,
+                        shadowColor: const Color(0x33000000),
+                        borderRadius: BorderRadius.circular(12),
+                        color: Colors.white,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            TextField(
+                              controller: _searchController,
+                              focusNode: _searchFocusNode,
+                              decoration: InputDecoration(
+                                hintText: 'ابحث عن طبيب أو تخصص أو منطقة',
+                                filled: true,
+                                fillColor: const Color(0xFFEEEEEE),
+                                isDense: true,
+                                prefixIcon:
+                                    const Icon(Icons.search, size: 22),
+                                suffixIcon: IconButton(
+                                  tooltip: 'إغلاق',
+                                  onPressed: () {
+                                    setState(() {
+                                      _searchFieldVisible = false;
+                                      _searchSuggestions =
+                                          <SearchSuggestionRow>[];
+                                    });
+                                    _searchFocusNode.unfocus();
+                                  },
+                                  icon: const Icon(Icons.close),
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide.none,
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 12,
+                                ),
+                              ),
                             ),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: BorderSide.none,
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 12,
-                            ),
-                          ),
+                            if (_searchFocusNode.hasFocus &&
+                                _searchSuggestions.isNotEmpty)
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxHeight: 220,
+                                ),
+                                child: ListView.separated(
+                                  shrinkWrap: true,
+                                  padding: EdgeInsets.zero,
+                                  itemCount: _searchSuggestions.length,
+                                  separatorBuilder:
+                                      (BuildContext context, int index) =>
+                                          const Divider(height: 1),
+                                  itemBuilder:
+                                      (BuildContext ctx, int index) {
+                                    final SearchSuggestionRow row =
+                                        _searchSuggestions[index];
+                                    final IconData icon = switch (row.kind) {
+                                      SearchSuggestionKind.doctorName =>
+                                        Icons.person_outline_rounded,
+                                      SearchSuggestionKind.specialization =>
+                                        Icons.medical_services_outlined,
+                                      SearchSuggestionKind.area =>
+                                        Icons.place_outlined,
+                                    };
+                                    return ListTile(
+                                      dense: true,
+                                      leading: Icon(
+                                        icon,
+                                        size: 22,
+                                        color: primaryMedicalBlue,
+                                      ),
+                                      title: Text(
+                                        row.label,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      onTap: () => _applySuggestionRow(row),
+                                    );
+                                  },
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                     )
@@ -1217,20 +1385,16 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
           else if (_filteredDoctors.isEmpty)
             SliverFillRemaining(
               hasScrollBody: false,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Center(
-                  child: Text(
-                    'لا توجد نتائج مطابقة للفلاتر الحالية.',
-                    style: TextStyle(color: Color(0xFF4A5568)),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              ),
+              child: _buildSmartEmptySearchState(),
             )
           else
             SliverPadding(
-              padding: const EdgeInsetsDirectional.fromSTEB(8, 0, 8, 88),
+              padding: EdgeInsetsDirectional.fromSTEB(
+                8,
+                0,
+                8,
+                listBottomInset,
+              ),
               sliver: SliverList(
                 delegate: SliverChildBuilderDelegate(
                   (BuildContext context, int index) {
@@ -1242,6 +1406,172 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             ),
         ],
       ),
+          _buildFavoritesTabContent(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSmartEmptySearchState() {
+    return SingleChildScrollView(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+        child: Column(
+          children: <Widget>[
+            Icon(
+              Icons.search_off_rounded,
+              size: 72,
+              color: Colors.blue.shade200,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'عذراً، لم نجد نتائج تطابق بحثك',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1D3557),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'جرّب تعديل الكلمات أو إزالة بعض الفلاتر.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                color: Color(0xFF718096),
+                height: 1.35,
+              ),
+            ),
+            const SizedBox(height: 24),
+            FilledButton.tonalIcon(
+              onPressed: _resetSearchAndFilters,
+              icon: const Icon(Icons.restart_alt_rounded),
+              label: const Text('إعادة ضبط البحث'),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'تخصصات شائعة',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF4A5568),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: _kPopularSearchSpecs
+                  .map(
+                    (String s) => ActionChip(
+                      label: Text(s, style: const TextStyle(fontSize: 12)),
+                      onPressed: () => _applyPopularSpecChip(s),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFavoritesTabContent() {
+    if (_isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
+    }
+    if (_errorMessage != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            _errorMessage!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Color(0xFFB00020)),
+          ),
+        ),
+      );
+    }
+    return Consumer<FavoritesProvider>(
+      builder: (BuildContext context, FavoritesProvider fav, _) {
+        if (fav.orderedFavoriteIds.isEmpty) {
+          return ListView(
+            padding: const EdgeInsets.all(24),
+            children: const <Widget>[
+              SizedBox(height: 24),
+              Icon(
+                Icons.favorite_border_rounded,
+                size: 72,
+                color: Color(0xFF90CAF9),
+              ),
+              SizedBox(height: 16),
+              Text(
+                'لم تحفظ أي عيادة بعد',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF1D3557),
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'اضغط على أيقونة القلب في بطاقة العيادة لإضافتها إلى «أطبائي».',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF718096),
+                  height: 1.35,
+                ),
+              ),
+            ],
+          );
+        }
+        final List<Doctor> ordered = <Doctor>[];
+        for (final int id in fav.orderedFavoriteIds) {
+          for (final Doctor d in _allDoctors) {
+            if (d.id == id) {
+              ordered.add(d);
+              break;
+            }
+          }
+        }
+        if (ordered.isEmpty) {
+          return ListView(
+            padding: const EdgeInsets.all(24),
+            children: const <Widget>[
+              SizedBox(height: 24),
+              Icon(Icons.cloud_off_outlined, size: 56, color: Color(0xFF90CAF9)),
+              SizedBox(height: 16),
+              Text(
+                'المفضلة محفوظة لكن هذه العيادات غير ضمن القائمة الحالية. جرّب تغيير المحافظة أو تحديث البيانات.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF4A5568),
+                  height: 1.35,
+                ),
+              ),
+            ],
+          );
+        }
+        return ListView.separated(
+          padding: EdgeInsets.fromLTRB(
+            12,
+            12,
+            12,
+            MediaQuery.paddingOf(context).bottom + 24,
+          ),
+          itemCount: ordered.length,
+          separatorBuilder: (BuildContext context, int index) =>
+              const SizedBox(height: 4),
+          itemBuilder: (BuildContext ctx, int i) => _buildClinicCard(ordered[i]),
+        );
+      },
     );
   }
 
@@ -1456,12 +1786,48 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
-                      Text(
-                        doctor.name,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                        ),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              doctor.name,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          Consumer<FavoritesProvider>(
+                            builder: (BuildContext context,
+                                FavoritesProvider fav, _) {
+                              final bool saved = fav.isFavorite(doctor.id);
+                              return IconButton(
+                                tooltip: saved
+                                    ? 'إزالة من أطبائي'
+                                    : 'حفظ في أطبائي',
+                                onPressed: () {
+                                  unawaited(fav.toggle(doctor.id));
+                                },
+                                padding: EdgeInsets.zero,
+                                visualDensity: VisualDensity.compact,
+                                constraints: const BoxConstraints(
+                                  minWidth: 36,
+                                  minHeight: 36,
+                                ),
+                                icon: Icon(
+                                  saved
+                                      ? Icons.favorite_rounded
+                                      : Icons.favorite_border_rounded,
+                                  color: saved
+                                      ? const Color(0xFFE53935)
+                                      : const Color(0xFF90A4AE),
+                                  size: 22,
+                                ),
+                              );
+                            },
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 6),
                       Align(
@@ -2180,6 +2546,17 @@ class _AddClinicPageState extends State<AddClinicPage> {
         title: const Text('إضافة'),
         backgroundColor: primaryMedicalBlue,
         foregroundColor: Colors.white,
+        leading: BackButton(
+          color: Colors.white,
+          onPressed: () => Navigator.maybePop(context),
+        ),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'الرئيسية',
+            onPressed: () => popToAppRoot(context),
+            icon: const Icon(Icons.home_rounded),
+          ),
+        ],
       ),
       body: Column(
         children: <Widget>[
@@ -2821,6 +3198,17 @@ class _ReportPageState extends State<ReportPage> {
         title: const Text('اقتراح تعديل معلومات'),
         backgroundColor: primaryMedicalBlue,
         foregroundColor: Colors.white,
+        leading: BackButton(
+          color: Colors.white,
+          onPressed: () => Navigator.maybePop(context),
+        ),
+        actions: <Widget>[
+          IconButton(
+            tooltip: 'الرئيسية',
+            onPressed: () => popToAppRoot(context),
+            icon: const Icon(Icons.home_rounded),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
@@ -2966,6 +3354,8 @@ class _ReportPageState extends State<ReportPage> {
   }
 }
 
+enum _DuplicateApprovalChoice { cancel, deleteRequest, updateExisting }
+
 class AdminDashboardPage extends StatefulWidget {
   const AdminDashboardPage({super.key, this.autoAuthenticated = false});
 
@@ -3068,6 +3458,69 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       for (final String k in kDoctorCols) k: request[k],
       'ph2': (request['ph2'] ?? '').toString(),
     };
+
+    // قيد فريد على (name, spec, gove). نتحقّق مسبقاً ونعرض خيارات
+    // واضحة بدل ما يفشل الـ INSERT برسالة قاعدة بيانات غير مفهومة.
+    final String reqName = (request['name'] ?? '').toString().trim();
+    final String reqSpec = (request['spec'] ?? '').toString().trim();
+    final String reqGove = (request['gove'] ?? '').toString().trim();
+    Map<String, dynamic>? duplicate;
+    try {
+      final List<dynamic> existing = await _supabase
+          .from(kSupabaseDoctorsTable)
+          .select('id, name, spec, gove')
+          .eq('name', reqName)
+          .eq('spec', reqSpec)
+          .eq('gove', reqGove)
+          .limit(1);
+      if (existing.isNotEmpty) {
+        duplicate = existing.first as Map<String, dynamic>;
+      }
+    } catch (_) {
+      // إذا فشل التحقق نكمل ونعتمد على رسالة الخطأ من INSERT.
+    }
+
+    if (duplicate != null) {
+      final _DuplicateApprovalChoice? choice =
+          await _askDuplicateApprovalChoice(reqName);
+      if (choice == null || choice == _DuplicateApprovalChoice.cancel) {
+        return;
+      }
+      if (choice == _DuplicateApprovalChoice.deleteRequest) {
+        await _rejectRequest(request);
+        return;
+      }
+      if (choice == _DuplicateApprovalChoice.updateExisting) {
+        try {
+          await _supabase
+              .from(kSupabaseDoctorsTable)
+              .update(payload)
+              .eq('id', duplicate['id']);
+          await _supabase
+              .from(kSupabasePendingDoctorsTable)
+              .delete()
+              .eq('id', request['id']);
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('تم تحديث بيانات العيادة الموجودة من بيانات الطلب.'),
+            ),
+          );
+          await _loadDashboardData();
+        } catch (error) {
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('فشل تحديث العيادة: $error')),
+          );
+        }
+        return;
+      }
+    }
+
     try {
       await _supabase.from(kSupabaseDoctorsTable).insert(payload);
       await _supabase
@@ -3085,10 +3538,59 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       if (!mounted) {
         return;
       }
+      final String message = _humanReadableApprovalError(error);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشلت الموافقة: $error')),
+        SnackBar(content: Text(message)),
       );
     }
+  }
+
+  Future<_DuplicateApprovalChoice?> _askDuplicateApprovalChoice(
+    String name,
+  ) {
+    return showDialog<_DuplicateApprovalChoice>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          title: const Text('عيادة مكررة'),
+          content: Text(
+            'يوجد مسبقاً عيادة بنفس الاسم والاختصاص والمحافظة:\n«$name».\n\n'
+            'ماذا تريد أن تفعل؟',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(ctx).pop(_DuplicateApprovalChoice.cancel),
+              child: const Text('إلغاء'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx)
+                  .pop(_DuplicateApprovalChoice.deleteRequest),
+              child: const Text('حذف الطلب فقط'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx)
+                  .pop(_DuplicateApprovalChoice.updateExisting),
+              child: const Text('تحديث الموجودة'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  String _humanReadableApprovalError(Object error) {
+    final String text = error.toString();
+    if (text.contains('doctors_unique') ||
+        text.contains('duplicate key') ||
+        text.contains('23505')) {
+      return 'العيادة موجودة مسبقاً (نفس الاسم/الاختصاص/المحافظة). جرّب «تحديث الموجودة» أو «حذف الطلب».';
+    }
+    if (text.contains('row-level security') ||
+        text.contains('permission denied')) {
+      return 'لا توجد صلاحيات كافية على قاعدة البيانات لإتمام الموافقة.';
+    }
+    return 'فشلت الموافقة: $error';
   }
 
   Future<void> _rejectRequest(Map<String, dynamic> request) async {
@@ -3366,11 +3868,11 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     }
     setState(() => _isSearchingDoctors = true);
     try {
-      final List<dynamic> results = await _supabase
-          .from(kSupabaseDoctorsTable)
-          .select()
-          .ilike('name', '%${query.trim()}%')
-          .limit(30);
+      final List<String> tokens = arabicSearchTokens(query);
+      final List<dynamic> results = await _supabase.rpc(
+        'search_doctors_by_tokens',
+        params: <String, dynamic>{'tokens': tokens},
+      );
       setState(() {
         _searchedDoctors = results.cast<Map<String, dynamic>>();
         _doctorSearchPerformed = true;
@@ -3610,6 +4112,17 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
           title: const Text('لوحة الأدمن'),
           backgroundColor: primaryMedicalBlue,
           foregroundColor: Colors.white,
+          leading: BackButton(
+            color: Colors.white,
+            onPressed: () => Navigator.maybePop(context),
+          ),
+          actions: <Widget>[
+            IconButton(
+              tooltip: 'الرئيسية',
+              onPressed: () => popToAppRoot(context),
+              icon: const Icon(Icons.home_rounded),
+            ),
+          ],
         ),
         body: _buildPasswordGate(),
       );
@@ -3621,6 +4134,17 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
           title: const Text('لوحة الأدمن'),
           backgroundColor: primaryMedicalBlue,
           foregroundColor: Colors.white,
+          leading: BackButton(
+            color: Colors.white,
+            onPressed: () => Navigator.maybePop(context),
+          ),
+          actions: <Widget>[
+            IconButton(
+              tooltip: 'الرئيسية',
+              onPressed: () => popToAppRoot(context),
+              icon: const Icon(Icons.home_rounded),
+            ),
+          ],
           bottom: const TabBar(
             labelColor: Colors.white,
             unselectedLabelColor: Colors.white70,
