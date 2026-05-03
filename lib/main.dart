@@ -501,7 +501,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       while (true) {
         final List<dynamic> response = await _supabase
             .from(kSupabaseDoctorsTable)
-            .select('id, spec, name, addr, area, ph, ph2, notes, gove, lat, lng')
+            .select('id, spec, name, addr, area, ph, ph2, notes, gove, lat:latitude, lng:longitude')
 .eq('gove', _selectedGovernorate ?? 'البصرة')
 .order('id', ascending: true)
             .range(from, from + _batchSize - 1);
