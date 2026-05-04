@@ -21,6 +21,13 @@ if (localPropertiesFile.exists()) {
     localProperties.load(FileInputStream(localPropertiesFile))
 }
 
+// مفتاح الخرائط: يُقرأ من android/local.properties أو من متغير البيئة MAPS_API_KEY (مثلاً في CI).
+// إذا ظل فارغاً، GoogleMap تعرض لوحة رمادية فارغة في كل الشاشات.
+val resolvedMapsApiKey: String =
+    localProperties.getProperty("MAPS_API_KEY")
+        ?: System.getenv("MAPS_API_KEY")
+        ?: ""
+
 android {
     namespace = "net.iraqhealth.app"
     compileSdk = flutter.compileSdkVersion
@@ -42,8 +49,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-        manifestPlaceholders["MAPS_API_KEY"] =
-            localProperties.getProperty("MAPS_API_KEY", "")
+        manifestPlaceholders["MAPS_API_KEY"] = resolvedMapsApiKey
     }
 
     if (keystorePropertiesFile.exists()) {
@@ -62,6 +68,10 @@ android {
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
