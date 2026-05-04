@@ -126,7 +126,8 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
 
   Future<void> _openMap() async {
     final LocationPickResult? picked =
-        await Navigator.of(context).push<LocationPickResult>(
+        await Navigator.of(context, rootNavigator: true)
+            .push<LocationPickResult>(
       buildAdaptiveRtlRoute<LocationPickResult>(
         LocationPickerScreen(
           initialLatitude: _pickedLat ?? widget.initialLatitude,

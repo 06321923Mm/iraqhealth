@@ -3138,8 +3138,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
           const SizedBox(height: 12),
           if (_governorate == 'البصرة') _basraAreaSection() else _otherGovernorateArea(),
           const SizedBox(height: 20),
-          _stepLabel('الموقع على خرائط Google (إلزامي)'),
-          DoctorMapLocationField(
+          addClinicStyleMapLocationBlock(
             latitude: _pickedLatitude,
             longitude: _pickedLongitude,
             onChanged: (double? latitude, double? longitude) {
@@ -3148,10 +3147,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
                 _pickedLongitude = longitude;
               });
             },
-            mapTitle: 'اختيار موقع العيادة',
-            dense: true,
-            mandatory: true,
-            allowClear: false,
           ),
         ],
       ),
@@ -4066,7 +4061,8 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       return;
     }
     final LocationPickResult? picked =
-        await Navigator.of(context).push<LocationPickResult>(
+        await Navigator.of(context, rootNavigator: true)
+            .push<LocationPickResult>(
       buildAdaptiveRtlRoute<LocationPickResult>(
         LocationPickerScreen(
           initialLatitude: initLa,
@@ -4931,7 +4927,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   }
 }
 
-// ── صفحة الإضافة/التعديل الكاملة للأدمن (بديل الحوار — تستضيف الخريطة إنلاين) ─
+// ── صفحة الإضافة/التعديل للأدمن: نفس كتلة الخريطة التي في [AddClinicPage]. ─
 
 class _AddEditDoctorPage extends StatefulWidget {
   const _AddEditDoctorPage({this.doc});
@@ -5366,34 +5362,10 @@ class _AddEditDoctorPageState extends State<_AddEditDoctorPage> {
                 maxLines: 6,
                 decoration: _dec('ملاحظات *'),
               ),
-              const SizedBox(height: 16),
-              const Text(
-                'الموقع على خرائط Google (إلزامي)',
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                  color: Color(0xFF1D3557),
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'اضغط «اختيار الموقع» لفتح الخريطة وتحديد نقطة العيادة — نفس آلية الإضافة في واجهة المستخدم.',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: Color(0xFF718096),
-                  height: 1.3,
-                ),
-              ),
-              const SizedBox(height: 12),
-              DoctorMapLocationField(
+              const SizedBox(height: 20),
+              addClinicStyleMapLocationBlock(
                 latitude: _pickedLatitude,
                 longitude: _pickedLongitude,
-                mapTitle: widget.doc != null
-                    ? 'تعديل موقع العيادة'
-                    : 'اختيار موقع العيادة',
-                dense: true,
-                mandatory: true,
-                allowClear: false,
                 onChanged: (double? latitude, double? longitude) {
                   setState(() {
                     _pickedLatitude = latitude;

@@ -28,8 +28,10 @@ class DoctorMapLocationField extends StatelessWidget {
   static const double _defaultMapLng = 47.7806;
 
   Future<void> _openMap(BuildContext context) async {
-    final LocationPickResult? picked = await Navigator.of(context)
-        .push<LocationPickResult>(
+    // rootNavigator: true — نفس سلوك فتح شاشة كاملة في كل السياقات (أدمن / إضافة عامة).
+    final LocationPickResult? picked =
+        await Navigator.of(context, rootNavigator: true)
+            .push<LocationPickResult>(
       buildAdaptiveRtlRoute<LocationPickResult>(
         LocationPickerScreen(
           initialLatitude: latitude ?? _defaultMapLat,
@@ -101,4 +103,38 @@ class DoctorMapLocationField extends StatelessWidget {
       ],
     );
   }
+}
+
+/// نفس كتلة «الخطوة ٣» في [AddClinicPage]: عنوان + [DoctorMapLocationField]
+/// بمعاملات ثابتة حتى تبقى واجهة الأدمن مطابقة لواجهة المستخدم حرفياً.
+Widget addClinicStyleMapLocationBlock({
+  required double? latitude,
+  required double? longitude,
+  required void Function(double? latitude, double? longitude) onChanged,
+}) {
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: <Widget>[
+      Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Text(
+          'الموقع على خرائط Google (إلزامي)',
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF1D3557),
+          ),
+        ),
+      ),
+      DoctorMapLocationField(
+        latitude: latitude,
+        longitude: longitude,
+        onChanged: onChanged,
+        mapTitle: 'اختيار موقع العيادة',
+        dense: true,
+        mandatory: true,
+        allowClear: false,
+      ),
+    ],
+  );
 }
