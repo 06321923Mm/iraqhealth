@@ -23,7 +23,6 @@ import 'doctor_location_repository.dart';
 import 'doctor_model.dart';
 import 'location_picker_screen.dart';
 import 'widgets/doctor_map_location_field.dart';
-import 'widgets/inline_doctor_location_picker.dart';
 import 'arabic_search_normalize.dart';
 import 'favorites_provider.dart';
 import 'search_suggestions.dart';
@@ -5371,20 +5370,31 @@ class _AddEditDoctorPageState extends State<_AddEditDoctorPage> {
               const Text(
                 'الموقع على خرائط Google (إلزامي)',
                 style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                  color: Color(0xFF475569),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: Color(0xFF1D3557),
                 ),
-                textAlign: TextAlign.right,
               ),
-              const SizedBox(height: 8),
-              InlineDoctorLocationPicker(
+              const SizedBox(height: 6),
+              const Text(
+                'اضغط «اختيار الموقع» لفتح الخريطة وتحديد نقطة العيادة — نفس آلية الإضافة في واجهة المستخدم.',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Color(0xFF718096),
+                  height: 1.3,
+                ),
+              ),
+              const SizedBox(height: 12),
+              DoctorMapLocationField(
                 latitude: _pickedLatitude,
                 longitude: _pickedLongitude,
-                title: widget.doc != null
+                mapTitle: widget.doc != null
                     ? 'تعديل موقع العيادة'
                     : 'اختيار موقع العيادة',
-                onChanged: (double latitude, double longitude) {
+                dense: true,
+                mandatory: true,
+                allowClear: false,
+                onChanged: (double? latitude, double? longitude) {
                   setState(() {
                     _pickedLatitude = latitude;
                     _pickedLongitude = longitude;
