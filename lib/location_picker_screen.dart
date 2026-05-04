@@ -1,8 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -73,9 +71,6 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
   /// Silently fetches the user's current position (without prompting) so that
   /// [_runPlaceSearch] can bias results. Falls through quietly on denial/error.
   Future<void> _loadUserBiasIfPermitted() async {
-    if (kIsWeb) {
-      return;
-    }
     try {
       final bool enabled = await Geolocator.isLocationServiceEnabled();
       if (!enabled) {
@@ -223,9 +218,6 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
   }
 
   Future<void> _centerOnMyLocation() async {
-    if (kIsWeb) {
-      return;
-    }
     setState(() => _myLocationBusy = true);
     try {
       final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -380,98 +372,6 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (kIsWeb) {
-      return Scaffold(
-        appBar: AppBar(title: Text(widget.title)),
-        body: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              _buildSearchBar(),
-              const SizedBox(height: 12),
-              const Text(
-                'أدخل الإحداثيات الصحيحة (عرض، طول):',
-                textAlign: TextAlign.right,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _latCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'خط العرض latitude',
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                  signed: true,
-                ),
-                inputFormatters: <TextInputFormatter>[
-                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.,\-]')),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _lngCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'خط الطول longitude',
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                  signed: true,
-                ),
-                inputFormatters: <TextInputFormatter>[
-                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.,\-]')),
-                ],
-              ),
-              if (_geoLoading)
-                const Padding(
-                  padding: EdgeInsets.only(top: 12, bottom: 8),
-                  child: LinearProgressIndicator(minHeight: 3),
-                )
-              else if (_addressLine != null) ...<Widget>[
-                const SizedBox(height: 12),
-                Text(
-                  _addressLine!,
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(fontSize: 13, height: 1.35),
-                ),
-              ],
-              const Spacer(),
-              FilledButton(
-                onPressed: () {
-                  final double? la =
-                      double.tryParse(_latCtrl.text.replaceAll(',', '.'));
-                  final double? ln =
-                      double.tryParse(_lngCtrl.text.replaceAll(',', '.'));
-                  if (la == null || ln == null) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('أدخل أرقاماً صالحة')),
-                    );
-                    return;
-                  }
-                  if (!_isValidWgs84(la, ln)) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(
-                          'إحداثيات غير صالحة: العرض −90…90، الطول −180…180.',
-                        ),
-                      ),
-                    );
-                    return;
-                  }
-                  Navigator.of(context).pop(
-                    LocationPickResult(la, ln, addressLine: _addressLine),
-                  );
-                },
-                child: const Text('حفظ الإحداثيات'),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
