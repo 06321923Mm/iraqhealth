@@ -1,0 +1,86 @@
+# بناء APK منفصلة لكل ABI (حجم أصغر لكل جهاز) ورفعها كـ Artifacts على GitHub.
+# التشغيل: يدوياً من تبويب Actions → "Android split APKs (per ABI)" → Run workflow.
+#
+# الأسرار المطلوبة في المستودع (Settings → Secrets and variables → Actions):
+#   GOOGLE_SERVICES_JSON — محتوى ملف android/app/google-services.json (يمكن تخزينه نصاً كاملاً)
+#   MAPS_API_KEY — مفتاح Google Maps (يُكتب في android/local.properties أثناء البناء)
+#
+# اختياري (لتوقيع الإصدار إن وُجد keystore في المستودع):
+#   KEYSTORE_BASE64 — ملف .jks مشفّر base64
+#   KEY_PROPERTIES — محتوى android/key.properties (أسطر storeFile وكلمات المرور)
+#
+# بدون GOOGLE_SERVICES_JSON سيفشل البناء لأن المشروع يطبّق Gradle plugin لـ Firebase.
+
+name: Android split APKs (per ABI)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-split-apks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Write google-services.json
+        env:
+          JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "${JSON}" ]; then
+            echo "::error::Secret GOOGLE_SERVICES_JSON is not set. Add android/app/google-services.json contents to repo secrets."
+            exit 1
+          fi
+          printf '%s' "${JSON}" > android/app/google-services.json
+
+      - name: Write local.properties (Maps API key)
+        env:
+          KEY: ${{ secrets.MAPS_API_KEY }}
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" >> android/local.properties
+          if [ -n "${KEY}" ]; then
+            echo "MAPS_API_KEY=${KEY}" >> android/local.properties
+          fi
+
+      - name: Optional signing files
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          KP: ${{ secrets.KEY_PROPERTIES }}
+        run: |
+          if [ -n "${KS}" ] && [ -n "${KP}" ]; then
+            echo "${KS}" | base64 -d > android/upload-keystore.jks
+            printf '%s\n' "${KP}" > android/key.properties
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APKs (split per ABI)
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: >
+          flutter build apk --release --split-per-abi
+          --dart-define=ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+
+      - name: Upload split APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iraq-health-apk-split-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/*-release.apk
+          if-no-files-found: error
