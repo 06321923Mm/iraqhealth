@@ -58,3 +58,9 @@ ios/Runner/GoogleService-Info.plist
 
 # Node tooling (geocode script)
 tools/geocode-doctors/node_modules/
+
+# Cursor IDE
+.cursor/
+
+# Supabase temp files
+supabase/.temp/
