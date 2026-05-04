@@ -18,9 +18,11 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'analytics_service.dart';
 import 'app_navigation.dart';
+import 'data/doctor_coordinates.dart';
 import 'doctor_location_repository.dart';
 import 'doctor_model.dart';
 import 'location_picker_screen.dart';
+import 'widgets/doctor_map_location_field.dart';
 import 'arabic_search_normalize.dart';
 import 'favorites_provider.dart';
 import 'search_suggestions.dart';
@@ -28,6 +30,13 @@ import 'firebase_options.dart';
 import 'pwa_install_stub.dart'
     if (dart.library.js) 'pwa_install_web.dart';
 import 'splash_screen.dart';
+import 'supabase_write_errors.dart';
+import 'edit_suggestion/edit_suggestion_schema_service.dart';
+import 'edit_suggestion/schema_models.dart';
+import 'edit_suggestion/dynamic_report_insert.dart';
+import 'edit_suggestion/column_edit_semantics.dart';
+import 'edit_suggestion/arabic_column_label.dart';
+import 'widgets/dynamic_edit_suggestion_form.dart';
 
 const List<String> kGovernorates = <String>[
   'بغداد',
@@ -137,9 +146,10 @@ String get kAdminPassword {
   return '';
 }
 
-/// Allowed `public.reports.status` values used by the app (must match
-/// `reports_status_check` and RLS in Supabase migrations; also `reviewed`).
+/// Allowed `public.reports.status` values — must match `reports_status_check`
+/// constraint and RLS policies in Supabase migrations.
 const String kReportStatusPending = 'pending';
+const String kReportStatusReviewed = 'reviewed';
 const String kReportStatusResolved = 'resolved';
 const String kReportStatusDismissed = 'dismissed';
 
@@ -187,36 +197,11 @@ const String kSupabaseDoctorsTable = 'doctors';
 // مفاتيح لعمود public.reports.info_issue_type
 const Map<String, String> kInfoCorrectionTypeLabels = <String, String>{
   'wrong_phone': 'رقم الهاتف',
-  'wrong_map_link': 'رابط الخرائط',
   'wrong_address': 'نص العنوان',
+  'wrong_map_location': 'موقع العيادة على الخريطة',
   'wrong_name_or_spec': 'الاسم أو التخصص',
   'other': 'معلومة أخرى',
 };
-
-/// حمولة `insert` لجدول [kSupabaseReportsTable]. يحدّث الـ trigger العدد في [kSupabaseReportTotalsTable].
-Map<String, dynamic> buildReportRowPayload({
-  required int doctorId,
-  required String infoIssueType,
-  required String errorLocation,
-  required String suggestedCorrection,
-  String doctorName = '',
-}) {
-  return <String, dynamic>{
-    'doctor_id': doctorId,
-    'doctor_name': doctorName.trim(),
-    'info_issue_type': infoIssueType.trim(),
-    'error_location': errorLocation.trim(),
-    'suggested_correction': suggestedCorrection.trim(),
-    'status': kReportStatusPending,
-  };
-}
-
-String reportInsertErrorMessage(Object error) {
-  if (error is PostgrestException) {
-    return error.message;
-  }
-  return error.toString();
-}
 
 /// قائمة مناطق محافظة البصرة المستخدمة في نموذج إضافة/تعديل العيادة.
 /// مرتّبة وفق المناطق الموجودة فعلياً في قاعدة بيانات Supabase
@@ -501,7 +486,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       while (true) {
         final List<dynamic> response = await _supabase
             .from(kSupabaseDoctorsTable)
-            .select('id, spec, name, addr, area, ph, ph2, notes, gove, lat, lng')
+            .select(
+              'id, spec, name, addr, area, ph, ph2, notes, gove, latitude, longitude',
+            )
 .eq('gove', _selectedGovernorate ?? 'البصرة')
 .order('id', ascending: true)
             .range(from, from + _batchSize - 1);
@@ -655,10 +642,18 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   Future<void> _upsertReportCount(int doctorId) async {
     try {
+      final EditSuggestionSchemaService svc =
+          EditSuggestionSchemaService(_supabase);
+      final EditSuggestionSchemaBundle b = await svc.loadBundle();
+      final String fkCol = b.primaryTarget?.fkColumn.isNotEmpty == true
+          ? b.primaryTarget!.fkColumn
+          : 'doctor_id';
+      final String repTbl =
+          b.ok && b.reportsTable.isNotEmpty ? b.reportsTable : kSupabaseReportsTable;
       final List<dynamic> pending = await _supabase
-          .from(kSupabaseReportsTable)
+          .from(repTbl)
           .select('id')
-          .eq('doctor_id', doctorId)
+          .eq(fkCol, doctorId)
           .eq('status', kReportStatusPending);
       await _supabase.from(kSupabaseReportTotalsTable).upsert(
         <String, dynamic>{
@@ -842,13 +837,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       );
     }
     final String value = address.trim();
-    final bool isDirectMapLink =
-        value.startsWith('http://') || value.startsWith('https://');
-    final Uri uri = isDirectMapLink
-        ? Uri.parse(value)
-        : Uri.parse(
-            'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(value)}',
-          );
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      return;
+    }
+    final Uri uri = Uri.parse(
+      'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(value)}',
+    );
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
@@ -993,7 +987,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                       if (d.hasCoordinates)
                         _detailField(
                           'الإحداثيات',
-                          '${d.lat!.toStringAsFixed(5)}, ${d.lng!.toStringAsFixed(5)}',
+                          '${d.latitude!.toStringAsFixed(5)}, ${d.longitude!.toStringAsFixed(5)}',
                         ),
                       _detailField('الهاتف الأول', d.ph),
                       _detailField('الهاتف الثاني', d.ph2),
@@ -1052,8 +1046,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                                     MaterialPageRoute<LocationPickResult>(
                                       builder: (BuildContext _) =>
                                           LocationPickerScreen(
-                                        initialLatitude: d.lat ?? 30.5039,
-                                        initialLongitude: d.lng ?? 47.7806,
+                                        initialLatitude: d.latitude ?? 30.5039,
+                                        initialLongitude: d.longitude ?? 47.7806,
                                         title: 'تصحيح موقع العيادة',
                                       ),
                                     ),
@@ -1066,10 +1060,10 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                                         .submitLocationCorrection(
                                       _supabase,
                                       doctorId: d.id,
-                                      lat: picked.latitude,
-                                      lng: picked.longitude,
+                                      latitude: picked.latitude,
+                                      longitude: picked.longitude,
                                     );
-                                    docHolder[0] = d.withLatLng(
+                                    docHolder[0] = d.withCoordinates(
                                       picked.latitude,
                                       picked.longitude,
                                     );
@@ -1150,8 +1144,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                               Navigator.pop(ctx);
                               unawaited(
                                 _openGoogleMapsLatLng(
-                                  d.lat!,
-                                  d.lng!,
+                                  d.latitude!,
+                                  d.longitude!,
                                   locationDetail: displayName,
                                 ),
                               );
@@ -2165,8 +2159,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                                     ? () {
                                         if (doctor.hasCoordinates) {
                                           unawaited(_openGoogleMapsLatLng(
-                                            doctor.lat!,
-                                            doctor.lng!,
+                                            doctor.latitude!,
+                                            doctor.longitude!,
                                             locationDetail: doctor.name,
                                           ));
                                         } else {
@@ -2262,9 +2256,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
 /// Modal-bottom-sheet body for "اقتراح تعديل" on a doctor card.
 ///
-/// Owns its [TextEditingController]s so Flutter's State lifecycle disposes them
-/// after the route is fully removed — never mid-frame, which previously caused
-/// `_dependents.isEmpty` and "controller used after dispose" red screens.
+/// Uses Supabase RPC schema introspection so table/column names are not
+/// hardcoded in the client.
 class _ReportDoctorSheet extends StatefulWidget {
   const _ReportDoctorSheet({
     required this.doctor,
@@ -2279,62 +2272,27 @@ class _ReportDoctorSheet extends StatefulWidget {
 }
 
 class _ReportDoctorSheetState extends State<_ReportDoctorSheet> {
-  final SupabaseClient _supabase = Supabase.instance.client;
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
-  final TextEditingController _whereWrongController = TextEditingController();
-  final TextEditingController _suggestedController = TextEditingController();
-  String _typeKey = kInfoCorrectionTypeLabels.keys.first;
-  bool _submitting = false;
+  final EditSuggestionSchemaService _schemaService =
+      EditSuggestionSchemaService(Supabase.instance.client);
+  EditSuggestionSchemaBundle? _bundle;
+  bool _loading = true;
 
   @override
-  void dispose() {
-    _whereWrongController.dispose();
-    _suggestedController.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _load();
   }
 
-  Future<void> _submit() async {
-    if (_submitting) return;
-    if (!(_formKey.currentState?.validate() ?? false)) return;
-
-    FocusScope.of(context).unfocus();
-
-    final NavigatorState navigator = Navigator.of(context);
-    final ScaffoldMessengerState? sheetMessenger =
-        ScaffoldMessenger.maybeOf(context);
-    final int docId = widget.doctor.id;
-
-    setState(() => _submitting = true);
-
-    try {
-      await _supabase.from(kSupabaseReportsTable).insert(
-            buildReportRowPayload(
-              doctorId: docId,
-              doctorName: widget.doctor.name,
-              infoIssueType: _typeKey,
-              errorLocation: _whereWrongController.text,
-              suggestedCorrection: _suggestedController.text,
-            ),
-          );
-
-      // Notify the parent BEFORE popping so the success SnackBar uses the
-      // parent's still-mounted messenger.
-      widget.onSubmitted(docId);
-
-      if (navigator.mounted) {
-        navigator.pop();
-      }
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _submitting = false);
-      sheetMessenger?.showSnackBar(
-        SnackBar(
-          content: Text(
-            'تعذر الإرسال: ${reportInsertErrorMessage(error)}',
-          ),
-        ),
-      );
+  Future<void> _load() async {
+    final EditSuggestionSchemaBundle b = await _schemaService.loadBundle();
+    if (!mounted) {
+      return;
     }
+    setState(() {
+      _bundle = b;
+      _loading = false;
+    });
   }
 
   @override
@@ -2357,15 +2315,6 @@ class _ReportDoctorSheetState extends State<_ReportDoctorSheet> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                const Text(
-                  'اقتراح تعديل على المعلومات',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF1D3557),
-                  ),
-                ),
-                const SizedBox(height: 6),
                 Text(
                   widget.doctor.name,
                   style: const TextStyle(
@@ -2375,86 +2324,38 @@ class _ReportDoctorSheetState extends State<_ReportDoctorSheet> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'اقترح تصحيح المعلومات الظاهرة فقط (رقم، عنوان، رابط).',
+                  'اقترح تصحيح المعلومات الظاهرة فقط (رقم، عنوان، موقع على الخريطة).',
                   style: TextStyle(
                     fontSize: 12,
                     color: Color(0xFF718096),
                     height: 1.3,
                   ),
                 ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  initialValue: kInfoCorrectionTypeLabels.keys.first,
-                  decoration: const InputDecoration(
-                    labelText: 'أي حقل ناقص التصحيح؟',
-                    filled: true,
-                    fillColor: Color(0xFFF2F7FC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(14)),
-                    ),
-                  ),
-                  items: kInfoCorrectionTypeLabels.entries
-                      .map(
-                        (MapEntry<String, String> e) =>
-                            DropdownMenuItem<String>(
-                          value: e.key,
-                          child: Text(e.value),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (String? v) {
-                    if (v == null) return;
-                    setState(() => _typeKey = v);
-                  },
-                ),
                 const SizedBox(height: 12),
-                TextFormField(
-                  controller: _whereWrongController,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                    labelText:
-                        'وين يظهر الخطأ بالضبط؟ (مثلاً: مربع الهاتف، سطر التخصص)',
-                    alignLabelWithHint: true,
-                    filled: true,
-                    fillColor: Color(0xFFF2F7FC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(14)),
-                    ),
+                if (_loading)
+                  const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (_bundle != null)
+                  DynamicEditSuggestionForm(
+                    formKey: _formKey,
+                    bundle: _bundle!,
+                    schemaService: _schemaService,
+                    targetPkValue: widget.doctor.id,
+                    doctorNameSnapshot: widget.doctor.name,
+                    initialLatitude: widget.doctor.latitude ?? 30.5039,
+                    initialLongitude: widget.doctor.longitude ?? 47.7806,
+                    statusPendingValue: kReportStatusPending,
+                    compactIntro: true,
+                    onSubmitted: () {
+                      final NavigatorState navigator = Navigator.of(context);
+                      widget.onSubmitted(widget.doctor.id);
+                      if (navigator.mounted) {
+                        navigator.pop();
+                      }
+                    },
                   ),
-                  validator: (String? value) {
-                    if (value == null || value.trim().length < 3) {
-                      return 'حدد مكان الخطأ في البطاقة (3 أحرف على الأقل)';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: _suggestedController,
-                  maxLines: 4,
-                  decoration: const InputDecoration(
-                    labelText: 'ما التصحيح المقترح؟ (المعلومة الصحيحة)',
-                    alignLabelWithHint: true,
-                    filled: true,
-                    fillColor: Color(0xFFF2F7FC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(14)),
-                    ),
-                  ),
-                  validator: (String? value) {
-                    if (value == null || value.trim().length < 3) {
-                      return 'اذكر التصحيح المقترح بوضوح';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 18),
-                FilledButton(
-                  onPressed: _submitting ? null : _submit,
-                  child: Text(
-                    _submitting ? 'جارٍ الإرسال...' : 'إرسال الاقتراح',
-                  ),
-                ),
               ],
             ),
           ),
@@ -2487,7 +2388,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
   final TextEditingController _areaOtherGovernorateController = TextEditingController();
   final TextEditingController _basraCustomAreaController = TextEditingController();
   final TextEditingController _addressController = TextEditingController();
-  final TextEditingController _mapsUrlController = TextEditingController();
   final TextEditingController _phController = TextEditingController();
   final TextEditingController _ph2Controller = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
@@ -2502,6 +2402,8 @@ class _AddClinicPageState extends State<AddClinicPage> {
   String? _selectedBasraArea;
   bool _basraUseCustomArea = false;
   bool _isSubmitting = false;
+  double? _pickedLatitude;
+  double? _pickedLongitude;
 
   @override
   void dispose() {
@@ -2511,7 +2413,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
     _areaOtherGovernorateController.dispose();
     _basraCustomAreaController.dispose();
     _addressController.dispose();
-    _mapsUrlController.dispose();
     _phController.dispose();
     _ph2Controller.dispose();
     _notesController.dispose();
@@ -2628,11 +2529,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
     if (p2.isNotEmpty && p2.length < 6) {
       return false;
     }
-    final String maps = _mapsUrlController.text.trim();
-    if (maps.isNotEmpty &&
-        !maps.startsWith('http://') && !maps.startsWith('https://')) {
-      return false;
-    }
     if (_notesController.text.trim().length < 3) {
       return false;
     }
@@ -2651,6 +2547,9 @@ class _AddClinicPageState extends State<AddClinicPage> {
       return false;
     }
     if (!_validateContactFieldsForSupabase()) {
+      return false;
+    }
+    if (_pickedLatitude == null || _pickedLongitude == null) {
       return false;
     }
     return true;
@@ -2687,6 +2586,18 @@ class _AddClinicPageState extends State<AddClinicPage> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('يرجى اختيار المحافظة والمنطقة.')),
           );
+          break;
+        }
+        if (_pickedLatitude == null || _pickedLongitude == null) {
+          ok = false;
+          setState(() {});
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'يجب تحديد موقع العيادة على خرائط Google من هذه الخطوة.',
+              ),
+            ),
+          );
         }
         break;
     }
@@ -2710,6 +2621,18 @@ class _AddClinicPageState extends State<AddClinicPage> {
   }
 
   Future<void> _submit() async {
+    if (_pickedLatitude == null || _pickedLongitude == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'يجب تحديد موقع العيادة على خرائط Google (الخطوة ٣) قبل الإرسال.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
     if (!_validateEntireClinicForPendingInsert()) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2729,18 +2652,21 @@ class _AddClinicPageState extends State<AddClinicPage> {
       final String spec = _buildSpecForSubmit();
       final String area = _buildAreaForSubmit();
       final String notes = _buildNotesForSubmit();
-      final String maps = _mapsUrlController.text.trim();
       final String textAddr = _addressController.text.trim();
       final String ph2Text = _ph2Controller.text.trim();
       final Map<String, dynamic> payload = <String, dynamic>{
         'name': _nameController.text.trim(),
         'spec': spec,
-        'addr': maps.isNotEmpty ? maps : textAddr,
+        'addr': textAddr,
         'area': area,
         'ph': _phController.text.trim(),
         'ph2': ph2Text,
         'notes': notes,
         'gove': _governorate,
+        ...DoctorCoordinates.supabasePair(
+          latitude: _pickedLatitude,
+          longitude: _pickedLongitude,
+        ),
       };
       await _supabase.from(kSupabasePendingDoctorsTable).insert(payload);
       if (!mounted) {
@@ -2755,7 +2681,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تعذر إرسال الطلب: $error')),
+        SnackBar(content: Text(humanReadableSupabaseWriteError(error))),
       );
     } finally {
       if (mounted) {
@@ -2773,7 +2699,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
     _areaOtherGovernorateController.clear();
     _basraCustomAreaController.clear();
     _addressController.clear();
-    _mapsUrlController.clear();
     _phController.clear();
     _ph2Controller.clear();
     _notesController.clear();
@@ -2787,6 +2712,8 @@ class _AddClinicPageState extends State<AddClinicPage> {
       _governorate = kGovernorates.first;
       _selectedBasraArea = null;
       _basraUseCustomArea = false;
+      _pickedLatitude = null;
+      _pickedLongitude = null;
     });
   }
 
@@ -3195,6 +3122,22 @@ class _AddClinicPageState extends State<AddClinicPage> {
           ),
           const SizedBox(height: 12),
           if (_governorate == 'البصرة') _basraAreaSection() else _otherGovernorateArea(),
+          const SizedBox(height: 20),
+          _stepLabel('الموقع على خرائط Google (إلزامي)'),
+          DoctorMapLocationField(
+            latitude: _pickedLatitude,
+            longitude: _pickedLongitude,
+            onChanged: (double? latitude, double? longitude) {
+              setState(() {
+                _pickedLatitude = latitude;
+                _pickedLongitude = longitude;
+              });
+            },
+            mapTitle: 'اختيار موقع العيادة',
+            dense: true,
+            mandatory: true,
+            allowClear: false,
+          ),
         ],
       ),
     );
@@ -3332,22 +3275,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
           ),
           const SizedBox(height: 10),
           TextFormField(
-            controller: _mapsUrlController,
-            keyboardType: TextInputType.url,
-            textInputAction: TextInputAction.next,
-            decoration: _inputDecoration('رابط خرائط Google (اختياري)'),
-            autovalidateMode: AutovalidateMode.onUserInteraction,
-            validator: (String? v) {
-              final String t = v?.trim() ?? '';
-              if (t.isEmpty) return null;
-              if (!t.startsWith('http://') && !t.startsWith('https://')) {
-                return 'رابط يبدأ بـ http:// أو https://';
-              }
-              return null;
-            },
-          ),
-          const SizedBox(height: 10),
-          TextFormField(
             controller: _notesController,
             minLines: 3,
             maxLines: 6,
@@ -3376,22 +3303,33 @@ class ReportPage extends StatefulWidget {
 
 class _ReportPageState extends State<ReportPage> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
-  // Context-independent messenger: never call ScaffoldMessenger.of(context) here.
   final GlobalKey<ScaffoldMessengerState> _messengerKey =
       GlobalKey<ScaffoldMessengerState>();
   final SupabaseClient _supabase = Supabase.instance.client;
+  final EditSuggestionSchemaService _schemaService =
+      EditSuggestionSchemaService(Supabase.instance.client);
   final TextEditingController _doctorIdController = TextEditingController();
   final TextEditingController _doctorNameController = TextEditingController();
-  final TextEditingController _whereWrongController = TextEditingController();
-  final TextEditingController _suggestedController = TextEditingController();
-  String _typeKey = kInfoCorrectionTypeLabels.keys.first;
-  bool _isSubmitting = false;
+  EditSuggestionSchemaBundle? _bundle;
+  bool _schemaLoading = true;
   bool _isMounted = false;
 
   @override
   void initState() {
     super.initState();
     _isMounted = true;
+    _loadSchema();
+  }
+
+  Future<void> _loadSchema() async {
+    final EditSuggestionSchemaBundle b = await _schemaService.loadBundle();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _bundle = b;
+      _schemaLoading = false;
+    });
   }
 
   @override
@@ -3399,8 +3337,6 @@ class _ReportPageState extends State<ReportPage> {
     _isMounted = false;
     _doctorIdController.dispose();
     _doctorNameController.dispose();
-    _whereWrongController.dispose();
-    _suggestedController.dispose();
     super.dispose();
   }
 
@@ -3410,226 +3346,152 @@ class _ReportPageState extends State<ReportPage> {
     );
   }
 
-  Future<void> _submitReport() async {
-    // Stabilise keyboard / focus before any async work.
-    FocusScope.of(context).unfocus();
-
-    if (!_formKey.currentState!.validate()) return;
-
-    // Capture navigator before the async gap.
-    final NavigatorState navigator = Navigator.of(context);
-
-    if (_isMounted && mounted) {
-      setState(() => _isSubmitting = true);
-    }
-
-    final int? doctorId = int.tryParse(_doctorIdController.text.trim());
-    if (doctorId == null || doctorId <= 0) {
-      if (_isMounted && mounted) {
-        setState(() => _isSubmitting = false);
-      }
-      _showSnack('أدخل رقم سجل صحيح للعيادة.');
+  Future<void> _onDynamicSubmitted() async {
+    if (!_isMounted || !mounted) {
       return;
     }
-
-    final Map<String, dynamic> reportRow = buildReportRowPayload(
-      doctorId: doctorId,
-      doctorName: _doctorNameController.text,
-      infoIssueType: _typeKey,
-      errorLocation: _whereWrongController.text,
-      suggestedCorrection: _suggestedController.text,
-    );
-
-    try {
-      await _supabase.from(kSupabaseReportsTable).insert(reportRow);
-
-      _showSnack('شكراً، تم حفظ الاقتراح بنجاح.');
-
-      if (navigator.canPop()) {
-        navigator.pop();
-      } else if (_isMounted && mounted) {
-        // Only reached when there is no route to pop (very rare).
-        // Clear controllers and reset state without touching the Form tree.
-        _doctorIdController.clear();
-        _doctorNameController.clear();
-        _whereWrongController.clear();
-        _suggestedController.clear();
-        setState(() {
-          _isSubmitting = false;
-          _typeKey = kInfoCorrectionTypeLabels.keys.first;
-        });
-      }
-    } catch (e) {
-      debugPrint('SUBMISSION FAILED: $e');
-      if (_isMounted && mounted) {
-        setState(() => _isSubmitting = false);
-      }
-      _showSnack('تعذر الإرسال: ${reportInsertErrorMessage(e)}');
+    _showSnack('شكراً، تم حفظ الاقتراح بنجاح.');
+    final NavigatorState navigator = Navigator.of(context);
+    if (navigator.canPop()) {
+      navigator.pop();
+    } else {
+      _doctorIdController.clear();
+      _doctorNameController.clear();
     }
   }
 
   @override
   Widget build(BuildContext context) {
     const Color primaryMedicalBlue = Color(0xFF42A5F5);
+    final int? docId = int.tryParse(_doctorIdController.text.trim());
+    final bool idOk = docId != null && docId > 0;
     return ScaffoldMessenger(
       key: _messengerKey,
       child: Scaffold(
-      appBar: AppBar(
-        title: const Text('اقتراح تعديل معلومات'),
-        backgroundColor: primaryMedicalBlue,
-        foregroundColor: Colors.white,
-        leading: BackButton(
-          color: Colors.white,
-          onPressed: () => Navigator.maybePop(context),
-        ),
-        actions: <Widget>[
-          IconButton(
-            tooltip: 'الرئيسية',
-            onPressed: () => popToAppRoot(context),
-            icon: const Icon(Icons.home_rounded),
+        appBar: AppBar(
+          title: const Text('اقتراح تعديل معلومات'),
+          backgroundColor: primaryMedicalBlue,
+          foregroundColor: Colors.white,
+          leading: BackButton(
+            color: Colors.white,
+            onPressed: () => Navigator.maybePop(context),
           ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            children: <Widget>[
-              const Text(
-                'للاقتراحات التي تخص المعلومات الظاهرة فقط (ليس سلوكاً أو تقييماً).',
-                style: TextStyle(
-                  color: Color(0xFF718096),
-                  fontSize: 13,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 14),
-              TextFormField(
-                controller: _doctorIdController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'رقم سجل العيادة (مطلوب)',
-                  filled: true,
-                  fillColor: Color(0xFFF2F7FC),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
+          actions: <Widget>[
+            IconButton(
+              tooltip: 'الرئيسية',
+              onPressed: () => popToAppRoot(context),
+              icon: const Icon(Icons.home_rounded),
+            ),
+          ],
+        ),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              children: <Widget>[
+                const Text(
+                  'للاقتراحات التي تخص المعلومات الظاهرة فقط (ليس سلوكاً أو تقييماً).',
+                  style: TextStyle(
+                    color: Color(0xFF718096),
+                    fontSize: 13,
+                    height: 1.4,
                   ),
                 ),
-                validator: (String? value) {
-                  final String v = value?.trim() ?? '';
-                  if (v.isEmpty) {
-                    return 'أدخل رقم سجل يظهر في بطاقة العيادة';
-                  }
-                  final int? n = int.tryParse(v);
-                  if (n == null || n <= 0) {
-                    return 'أدخل رقمًا صحيحًا';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _doctorNameController,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'اسم العيادة (كما تظهر في التطبيق) *',
-                  filled: true,
-                  fillColor: Color(0xFFF2F7FC),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                const SizedBox(height: 14),
+                TextFormField(
+                  controller: _doctorIdController,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'رقم سجل العيادة (مطلوب)',
+                    filled: true,
+                    fillColor: Color(0xFFF2F7FC),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(14)),
+                    ),
                   ),
+                  validator: (String? value) {
+                    final String v = value?.trim() ?? '';
+                    if (v.isEmpty) {
+                      return 'أدخل رقم سجل يظهر في بطاقة العيادة';
+                    }
+                    final int? n = int.tryParse(v);
+                    if (n == null || n <= 0) {
+                      return 'أدخل رقمًا صحيحًا';
+                    }
+                    return null;
+                  },
                 ),
-                validator: (String? value) {
-                  if (value == null || value.trim().length < 2) {
-                    return 'أدخل اسم العيادة (حرفان على الأقل)';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: kInfoCorrectionTypeLabels.keys.first,
-                decoration: const InputDecoration(
-                  labelText: 'أي حقل ناقص التصحيح؟',
-                  filled: true,
-                  fillColor: Color(0xFFF2F7FC),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _doctorNameController,
+                  textInputAction: TextInputAction.next,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'اسم العيادة (كما تظهر في التطبيق) *',
+                    filled: true,
+                    fillColor: Color(0xFFF2F7FC),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(14)),
+                    ),
                   ),
+                  validator: (String? value) {
+                    if (value == null || value.trim().length < 2) {
+                      return 'أدخل اسم العيادة (حرفان على الأقل)';
+                    }
+                    return null;
+                  },
                 ),
-                items: kInfoCorrectionTypeLabels.entries
-                    .map(
-                      (MapEntry<String, String> e) => DropdownMenuItem<String>(
-                        value: e.key,
-                        child: Text(e.value),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (String? v) {
-                  if (v == null) {
-                    return;
-                  }
-                  setState(() {
-                    _typeKey = v;
-                  });
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _whereWrongController,
-                minLines: 1,
-                maxLines: 3,
-                decoration: const InputDecoration(
-                  labelText:
-                      'وين يظهر الخطأ بالضبط؟ (مثلاً: مربع الهاتف، سطر التخصص)',
-                  filled: true,
-                  fillColor: Color(0xFFF2F7FC),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                const SizedBox(height: 16),
+                if (_schemaLoading)
+                  const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (_bundle != null && _bundle!.ok && idOk)
+                  FutureBuilder<List<dynamic>>(
+                    future: _supabase
+                        .from(kSupabaseDoctorsTable)
+                        .select('latitude, longitude')
+                        .eq('id', docId)
+                        .limit(1),
+                    builder: (BuildContext ctx, AsyncSnapshot<List<dynamic>> snap) {
+                      double la = 30.5039;
+                      double ln = 47.7806;
+                      if (snap.hasData && snap.data!.isNotEmpty) {
+                        final Map<String, dynamic> row =
+                            snap.data!.first as Map<String, dynamic>;
+                        la = DoctorCoordinates.readLatitude(row) ?? la;
+                        ln = DoctorCoordinates.readLongitude(row) ?? ln;
+                      }
+                      return DynamicEditSuggestionForm(
+                        formKey: _formKey,
+                        bundle: _bundle!,
+                        schemaService: _schemaService,
+                        targetPkValue: docId,
+                        doctorNameSnapshot: _doctorNameController.text.trim(),
+                        initialLatitude: la,
+                        initialLongitude: ln,
+                        statusPendingValue: kReportStatusPending,
+                        onSubmitted: _onDynamicSubmitted,
+                      );
+                    },
+                  )
+                else if (_bundle != null && !_bundle!.ok)
+                  const Text(
+                    'تعذر تحميل هيكل قاعدة البيانات. طبّق migration «edit_suggestion_schema_introspection».',
+                  )
+                else if (!idOk)
+                  const Text(
+                    'أدخل رقم سجل صحيحاً لعرض نموذج الاقتراح.',
+                    style: TextStyle(color: Color(0xFF718096)),
                   ),
-                ),
-                validator: (String? value) {
-                  if (value == null || value.trim().length < 3) {
-                    return 'حدد مكان الخطأ (3 أحرف على الأقل)';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _suggestedController,
-                maxLines: 4,
-                decoration: const InputDecoration(
-                  labelText: 'ما التصحيح المقترح؟ (المعلومة الصحيحة)',
-                  filled: true,
-                  fillColor: Color(0xFFF2F7FC),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
-                  ),
-                ),
-                validator: (String? value) {
-                  if (value == null || value.trim().length < 3) {
-                    return 'اذكر التصحيح المقترح';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _isSubmitting ? null : _submitReport,
-                  child: Text(
-                    _isSubmitting ? 'جارٍ الإرسال...' : 'إرسال الاقتراح',
-                  ),
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
-    ),
     );
   }
 }
@@ -3648,12 +3510,15 @@ class AdminDashboardPage extends StatefulWidget {
 
 class _AdminDashboardPageState extends State<AdminDashboardPage> {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final EditSuggestionSchemaService _reportSchemaService =
+      EditSuggestionSchemaService(Supabase.instance.client);
+  EditSuggestionSchemaBundle? _reportSchemaBundle;
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _doctorSearchController = TextEditingController();
   late bool _authenticated;
   bool _isLoading = false;
   List<Map<String, dynamic>> _pendingDoctors = <Map<String, dynamic>>[];
-  /// يُملأ من [kSupabaseReportsTable] (اقتراح تعديل من التطبيق).
+  /// يُملأ من جدول التقارير الذي يحدّده RPC [app_edit_suggestion_schema_bundle].
   List<Map<String, dynamic>> _reportRows = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _searchedDoctors = <Map<String, dynamic>>[];
   bool _isSearchingDoctors = false;
@@ -3679,11 +3544,57 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     super.dispose();
   }
 
+  String _adminReportsTable() {
+    final EditSuggestionSchemaBundle? b = _reportSchemaBundle;
+    if (b != null && b.ok && b.reportsTable.isNotEmpty) {
+      return b.reportsTable;
+    }
+    return kSupabaseReportsTable;
+  }
+
+  String _adminDoctorsEntityTable() {
+    final EditSuggestionTarget? t = _reportSchemaBundle?.primaryTarget;
+    if (t != null && t.refTable.isNotEmpty) {
+      return t.refTable;
+    }
+    return kSupabaseDoctorsTable;
+  }
+
+  String _adminReportFkColumn() {
+    final String? c = _reportSchemaBundle?.primaryTarget?.fkColumn;
+    if (c != null && c.isNotEmpty) {
+      return c;
+    }
+    return 'doctor_id';
+  }
+
+  int? _adminReportTargetId(Map<String, dynamic> r) {
+    return int.tryParse(
+      (r[_adminReportFkColumn()] ?? r['doctor_id'] ?? '').toString(),
+    );
+  }
+
+  SchemaColumn? _schemaColumnByName(String name) {
+    final List<SchemaColumn>? list =
+        _reportSchemaBundle?.primaryTarget?.refColumns;
+    if (list == null) {
+      return null;
+    }
+    for (final SchemaColumn c in list) {
+      if (c.columnName == name) {
+        return c;
+      }
+    }
+    return null;
+  }
+
   /// ربط لوحة الأدمن بجدول [kSupabasePendingDoctorsTable] و [kSupabaseReportsTable].
   Future<void> _loadDashboardData() async {
     setState(() {
       _isLoading = true;
     });
+    final EditSuggestionSchemaBundle schemaBundle =
+        await _reportSchemaService.loadBundle();
     List<Map<String, dynamic>> nextPending = <Map<String, dynamic>>[];
     List<Map<String, dynamic>> nextReports = <Map<String, dynamic>>[];
     try {
@@ -3702,11 +3613,11 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       }
     }
     try {
+      final String repTable =
+          schemaBundle.ok ? schemaBundle.reportsTable : kSupabaseReportsTable;
       final List<dynamic> reports = await _supabase
-          .from(kSupabaseReportsTable)
-          .select(
-            'id, doctor_id, doctor_name, info_issue_type, error_location, suggested_correction, status, created_at',
-          )
+          .from(repTable)
+          .select()
           .eq('status', kReportStatusPending)
           .order('created_at', ascending: false)
           .limit(200);
@@ -3726,6 +3637,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     setState(() {
       _pendingDoctors = nextPending;
       _reportRows = nextReports;
+      _reportSchemaBundle = schemaBundle;
       _isLoading = false;
     });
   }
@@ -3738,6 +3650,26 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       for (final String k in kDoctorCols) k: request[k],
       'ph2': (request['ph2'] ?? '').toString(),
     };
+    final double? reqLat = DoctorCoordinates.readLatitude(request);
+    final double? reqLng = DoctorCoordinates.readLongitude(request);
+    if (reqLat == null || reqLng == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'لا يمكن الموافقة: الطلب يجب أن يتضمّن موقعاً محدداً على خرائط Google (خطوة الإحداثيات).',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    payload['latitude'] = reqLat;
+    payload['longitude'] = reqLng;
+    final String addrVal = (payload['addr'] ?? '').toString().trim();
+    if (addrVal.startsWith('http://') || addrVal.startsWith('https://')) {
+      payload['addr'] = '—';
+    }
 
     // قيد فريد على (name, spec, gove). نتحقّق مسبقاً ونعرض خيارات
     // واضحة بدل ما يفشل الـ INSERT برسالة قاعدة بيانات غير مفهومة.
@@ -3913,10 +3845,11 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   /// لا يرمي exception — المزامنة ثانوية ولا تعيق العملية الرئيسية.
   Future<void> _syncReportTotal(int docId) async {
     try {
+      final String fk = _adminReportFkColumn();
       final List<dynamic> pending = await _supabase
-          .from(kSupabaseReportsTable)
+          .from(_adminReportsTable())
           .select('id')
-          .eq('doctor_id', docId)
+          .eq(fk, docId)
           .eq('status', kReportStatusPending);
       await _supabase.from(kSupabaseReportTotalsTable).upsert(
         <String, dynamic>{
@@ -3931,12 +3864,10 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   }
 
   Future<void> _dismissReport(Map<String, dynamic> r) async {
-    final int? docId = r['doctor_id'] is int
-        ? r['doctor_id'] as int
-        : int.tryParse(r['doctor_id'].toString());
+    final int? docId = _adminReportTargetId(r);
     try {
       await _supabase
-          .from(kSupabaseReportsTable)
+          .from(_adminReportsTable())
           .update(<String, dynamic>{'status': kReportStatusDismissed})
           .eq('id', r['id']);
       if (docId != null) {
@@ -3959,19 +3890,96 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     }
   }
 
+  Future<void> _applyMapLocationFromReport(
+    Map<String, dynamic> r,
+    int docId,
+  ) async {
+    double initLa = 30.5039;
+    double initLo = 47.7806;
+    try {
+      final List<dynamic> res = await _supabase
+          .from(_adminDoctorsEntityTable())
+          .select('latitude, longitude')
+          .eq('id', docId)
+          .limit(1);
+      if (res.isNotEmpty) {
+        final Map<String, dynamic> d = res.first as Map<String, dynamic>;
+        initLa = DoctorCoordinates.readLatitude(d) ?? initLa;
+        initLo = DoctorCoordinates.readLongitude(d) ?? initLo;
+      }
+    } catch (_) {}
+    final double? sugLa = DoctorCoordinates.readSuggestedLatitude(r);
+    final double? sugLo = DoctorCoordinates.readSuggestedLongitude(r);
+    if (sugLa != null && sugLo != null) {
+      initLa = sugLa;
+      initLo = sugLo;
+    }
+    if (!mounted) {
+      return;
+    }
+    final LocationPickResult? picked =
+        await Navigator.of(context).push<LocationPickResult>(
+      buildAdaptiveRtlRoute<LocationPickResult>(
+        LocationPickerScreen(
+          initialLatitude: initLa,
+          initialLongitude: initLo,
+          title: 'تأكيد موقع العيادة من الاقتراح',
+        ),
+      ),
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+    try {
+      await _supabase.from(_adminDoctorsEntityTable()).update(<String, dynamic>{
+        'latitude': picked.latitude,
+        'longitude': picked.longitude,
+      }).eq('id', docId);
+      await _supabase.from(_adminReportsTable()).update(<String, dynamic>{
+        'status': kReportStatusResolved,
+      }).eq('id', r['id']);
+      await _syncReportTotal(docId);
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تم تحديث إحداثيات العيادة من الاقتراح.'),
+        ),
+      );
+      await _loadDashboardData();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('فشل تطبيق الموقع: $error')),
+      );
+    }
+  }
+
   Future<void> _applyReportCorrection(Map<String, dynamic> r) async {
-    final int? docId = r['doctor_id'] is int
-        ? r['doctor_id'] as int
-        : int.tryParse(r['doctor_id'].toString());
+    final int? docId = _adminReportTargetId(r);
     if (docId == null) {
+      return;
+    }
+
+    if (r['info_issue_type']?.toString() == 'wrong_map_location') {
+      await _applyMapLocationFromReport(r, docId);
       return;
     }
 
     Map<String, dynamic>? docRow;
     try {
+      final List<SchemaColumn> rc =
+          _reportSchemaBundle?.primaryTarget?.refColumns ??
+              const <SchemaColumn>[];
+      final String selectList = rc.isEmpty
+          ? 'id, name, spec, addr, ph, ph2, notes'
+          : rc.map((SchemaColumn c) => c.columnName).join(', ');
       final List<dynamic> res = await _supabase
-          .from(kSupabaseDoctorsTable)
-          .select('id, name, spec, addr, ph, ph2, notes')
+          .from(_adminDoctorsEntityTable())
+          .select(selectList)
           .eq('id', docId)
           .limit(1);
       if (res.isNotEmpty) {
@@ -3983,24 +3991,43 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       return;
     }
 
-    const List<String> fields = <String>[
-      'ph',
-      'ph2',
-      'addr',
-      'name',
-      'spec',
-      'notes',
-    ];
-    const Map<String, String> fieldLabels = <String, String>{
-      'ph': 'رقم الهاتف (ph)',
-      'ph2': 'رقم الهاتف 2 (ph2)',
-      'addr': 'العنوان (addr)',
-      'name': 'الاسم (name)',
-      'spec': 'التخصص (spec)',
-      'notes': 'ملاحظات (notes)',
+    final List<String> fields = _reportSchemaBundle?.primaryTarget == null
+        ? <String>['ph', 'ph2', 'addr', 'name', 'spec', 'notes']
+        : _reportSchemaBundle!.primaryTarget!.refColumns
+            .where(
+              (SchemaColumn c) =>
+                  !c.isPrimaryKey && !isReporterSkippableColumn(c),
+            )
+            .map((SchemaColumn c) => c.columnName)
+            .toList();
+    final Map<String, String> fieldLabels = <String, String>{
+      for (final String f in fields)
+        f: arabicLabelForColumn(
+          _schemaColumnByName(f) ??
+              SchemaColumn(
+                columnName: f,
+                dataType: 'text',
+                isNullable: true,
+                isPrimaryKey: false,
+              ),
+        ),
     };
 
-    String selectedField = _fieldForIssueType(r['info_issue_type']?.toString());
+    String selectedField = resolveReportTargetColumn(r) ??
+        _fieldForIssueType(r['info_issue_type']?.toString());
+    if (fields.isNotEmpty && !fields.contains(selectedField)) {
+      selectedField = fields.first;
+    }
+    if (fields.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('لا توجد أعمدة قابلة للتعديل في مخطط قاعدة البيانات.'),
+          ),
+        );
+      }
+      return;
+    }
     final TextEditingController valueCtrl = TextEditingController(
       text: (r['suggested_correction'] ?? '').toString(),
     );
@@ -4109,11 +4136,11 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   ) async {
     try {
       await _supabase
-          .from(kSupabaseDoctorsTable)
+          .from(_adminDoctorsEntityTable())
           .update(<String, dynamic>{field: newValue})
           .eq('id', docId);
       await _supabase
-          .from(kSupabaseReportsTable)
+          .from(_adminReportsTable())
           .update(<String, dynamic>{'status': kReportStatusResolved})
           .eq('id', r['id']);
       await _syncReportTotal(docId);
@@ -4168,44 +4195,89 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     }
   }
 
-  Future<void> _directAddDoctor(Map<String, dynamic> data) async {
+  Future<void> _runWithSavingOverlay(Future<void> Function() job) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext ctx) {
+        return PopScope(
+          canPop: false,
+          child: Center(
+            child: Card(
+              elevation: 8,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const <Widget>[
+                    CircularProgressIndicator(),
+                    SizedBox(height: 18),
+                    Text('جاري الحفظ...'),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
     try {
-      await _supabase.from(kSupabaseDoctorsTable).insert(data);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تمت الإضافة بنجاح.')),
-      );
-      if (_doctorSearchController.text.isNotEmpty) {
-        await _searchDoctors(_doctorSearchController.text);
-      }
-    } catch (e) {
+      await job();
+    } finally {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('فشلت الإضافة: $e')));
+        Navigator.of(context, rootNavigator: true).pop();
       }
     }
   }
 
+  Future<void> _directAddDoctor(Map<String, dynamic> data) async {
+    await _runWithSavingOverlay(() async {
+      try {
+        await _supabase.from(kSupabaseDoctorsTable).insert(data);
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تمت الإضافة بنجاح.')),
+        );
+        if (_doctorSearchController.text.isNotEmpty) {
+          await _searchDoctors(_doctorSearchController.text);
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(humanReadableSupabaseWriteError(e))),
+          );
+        }
+      }
+    });
+  }
+
   Future<void> _directEditDoctor(
       dynamic docId, Map<String, dynamic> updates) async {
-    try {
-      await _supabase
-          .from(kSupabaseDoctorsTable)
-          .update(updates)
-          .eq('id', docId);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم التعديل بنجاح.')),
-      );
-      if (_doctorSearchController.text.isNotEmpty) {
-        await _searchDoctors(_doctorSearchController.text);
+    await _runWithSavingOverlay(() async {
+      try {
+        await _supabase
+            .from(kSupabaseDoctorsTable)
+            .update(updates)
+            .eq('id', docId);
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم التعديل بنجاح.')),
+        );
+        if (_doctorSearchController.text.isNotEmpty) {
+          await _searchDoctors(_doctorSearchController.text);
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(humanReadableSupabaseWriteError(e))),
+          );
+        }
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('فشل التعديل: $e')));
-      }
-    }
+    });
   }
 
   Future<void> _deleteDoctor(dynamic docId, String name) async {
@@ -4525,6 +4597,14 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     if (key == null || key.isEmpty) {
       return '';
     }
+    if (key.startsWith('field_edit:')) {
+      final String col = key.substring('field_edit:'.length).trim();
+      final SchemaColumn? sc = _schemaColumnByName(col);
+      if (sc != null) {
+        return arabicLabelForColumn(sc);
+      }
+      return col;
+    }
     return kInfoCorrectionTypeLabels[key] ?? key;
   }
 
@@ -4539,7 +4619,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
         children: <Widget>[
           ListTile(
             isThreeLine: true,
-            title: Text('id: ${r['doctor_id']}$namePart  |  $type'),
+            title: Text('id: ${_adminReportTargetId(r) ?? ''}$namePart  |  $type'),
             subtitle: Text(
               'الخطأ: ${r['error_location']}\n'
               'التصحيح المقترح: ${r['suggested_correction']}\n'
@@ -4708,7 +4788,6 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
   late final TextEditingController _textAddrCtrl;
   late final TextEditingController _phCtrl;
   late final TextEditingController _ph2Ctrl;
-  late final TextEditingController _mapsUrlCtrl;
   late final TextEditingController _notesCtrl;
 
   _MedicalFieldType? _medicalType;
@@ -4719,6 +4798,8 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
   String _selectedGove = kGovernorates.first;
   String? _selectedBasraArea;
   bool _basraUseCustomArea = false;
+  double? _pickedLatitude;
+  double? _pickedLongitude;
 
   @override
   void initState() {
@@ -4731,7 +4812,6 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
     _textAddrCtrl = TextEditingController();
     _phCtrl = TextEditingController();
     _ph2Ctrl = TextEditingController();
-    _mapsUrlCtrl = TextEditingController();
     _notesCtrl = TextEditingController();
 
     final Map<String, dynamic>? doc = widget.doc;
@@ -4742,14 +4822,14 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
       _selectedGove = kGovernorates.contains(gove) ? gove : kGovernorates.first;
       _initArea(doc['area']?.toString() ?? '', _selectedGove);
       final String addr = doc['addr']?.toString() ?? '';
-      if (addr.startsWith('http://') || addr.startsWith('https://')) {
-        _mapsUrlCtrl.text = addr;
-      } else {
+      if (!addr.startsWith('http://') && !addr.startsWith('https://')) {
         _textAddrCtrl.text = addr;
       }
       _parseNotes(doc['notes']?.toString() ?? '');
       _phCtrl.text = doc['ph']?.toString() ?? '';
       _ph2Ctrl.text = doc['ph2']?.toString() ?? '';
+      _pickedLatitude = DoctorCoordinates.readLatitude(doc);
+      _pickedLongitude = DoctorCoordinates.readLongitude(doc);
     }
   }
 
@@ -4894,7 +4974,6 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
     _textAddrCtrl.dispose();
     _phCtrl.dispose();
     _ph2Ctrl.dispose();
-    _mapsUrlCtrl.dispose();
     _notesCtrl.dispose();
     super.dispose();
   }
@@ -5112,42 +5191,38 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
                 decoration: _dec('الهاتف الثاني (اختياري)'),
               ),
               const SizedBox(height: 8),
-              // ── رابط الخرائط ─────────────────────────────────────────────────
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: <Widget>[
-                  Expanded(
-                    child: TextField(
-                      controller: _mapsUrlCtrl,
-                      keyboardType: TextInputType.url,
-                      textInputAction: TextInputAction.next,
-                      decoration: _dec('رابط خرائط Google (اختياري)')
-                          .copyWith(
-                              prefixIcon:
-                                  const Icon(Icons.map_outlined)),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'افتح الخريطة',
-                    icon: const Icon(Icons.open_in_new,
-                        color: Color(0xFF42A5F5)),
-                    onPressed: () async {
-                      final String url = _mapsUrlCtrl.text.trim();
-                      if (url.isNotEmpty) {
-                        await launchUrl(Uri.parse(url),
-                            mode: LaunchMode.externalApplication);
-                      }
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
               // ── ملاحظات ──────────────────────────────────────────────────────
               TextField(
                 controller: _notesCtrl,
                 minLines: 3,
                 maxLines: 6,
                 decoration: _dec('ملاحظات *'),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'الموقع على خرائط Google (إلزامي)',
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                  color: Color(0xFF475569),
+                ),
+                textAlign: TextAlign.right,
+              ),
+              const SizedBox(height: 8),
+              DoctorMapLocationField(
+                latitude: _pickedLatitude,
+                longitude: _pickedLongitude,
+                mapTitle: widget.doc != null
+                    ? 'تعديل موقع العيادة'
+                    : 'اختيار موقع العيادة',
+                mandatory: true,
+                allowClear: false,
+                onChanged: (double? latitude, double? longitude) {
+                  setState(() {
+                    _pickedLatitude = latitude;
+                    _pickedLongitude = longitude;
+                  });
+                },
               ),
             ],
           ),
@@ -5195,13 +5270,8 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
               error = 'أدخل رقم الهاتف';
             } else if (notes.length < 3) {
               error = 'أدخل الملاحظات';
-            } else {
-              final String maps = _mapsUrlCtrl.text.trim();
-              if (maps.isNotEmpty &&
-                  !maps.startsWith('http://') &&
-                  !maps.startsWith('https://')) {
-                error = 'رابط الخرائط غير صحيح';
-              }
+            } else if (_pickedLatitude == null || _pickedLongitude == null) {
+              error = 'يجب تحديد موقع العيادة على خرائط Google';
             }
 
             if (error != null) {
@@ -5210,17 +5280,21 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
               return;
             }
 
-            final String mapsUrl = _mapsUrlCtrl.text.trim();
-            Navigator.of(context).pop(<String, dynamic>{
+            final Map<String, dynamic> row = <String, dynamic>{
               'name': name,
               'spec': _buildSpec(),
               'gove': _selectedGove,
               'area': area,
-              'addr': mapsUrl.isNotEmpty ? mapsUrl : textAddr,
+              'addr': textAddr,
               'ph': ph,
               'ph2': _ph2Ctrl.text.trim(),
               'notes': 'العنوان: $textAddr\n\nملاحظات: $notes',
-            });
+              ...DoctorCoordinates.supabasePair(
+                latitude: _pickedLatitude,
+                longitude: _pickedLongitude,
+              ),
+            };
+            Navigator.of(context).pop(row);
           },
           child: Text(isEdit ? 'حفظ التعديل' : 'إضافة'),
         ),

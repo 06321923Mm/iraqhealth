@@ -1,1 +1,22 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"iraqhealth-b08f6","appId":"1:63970501606:android:3132dbae5437c3a750ec27","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"iraqhealth-b08f6","configurations":{"android":"1:63970501606:android:3132dbae5437c3a750ec27","web":"1:63970501606:web:f13f9990483dee8b50ec27"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "iraqhealth-b08f6",
+          "appId": "1:63970501606:android:3132dbae5437c3a750ec27",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "iraqhealth-b08f6",
+          "configurations": {
+            "android": "1:63970501606:android:3132dbae5437c3a750ec27",
+            "web": "1:63970501606:web:f13f9990483dee8b50ec27"
+          }
+        }
+      }
+    }
+  }
+}

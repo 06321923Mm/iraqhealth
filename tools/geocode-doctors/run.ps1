@@ -1,0 +1,4 @@
+$env:GOOGLE_GEOCODING_API_KEY = "AIzaSyAeJbTEz38PfgT0tgo-pIeyCRyvtzo57Zo"
+$env:SUPABASE_URL = "https://hygujebngiwemwujjcgm.supabase.co"
+$env:SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5Z3VqZWJuZ2l3ZW13dWpqY2dtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTc2ODUyMCwiZXhwIjoyMDkxMzQ0NTIwfQ.LS-NLorqkSIPQ1xozEFSNoRX876ma7GRVe8jDb_8P5I"
+node geocode.mjs

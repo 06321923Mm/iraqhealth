@@ -1,0 +1,14 @@
+{
+  "name": "geocode-doctors-supabase",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "geocode": "node geocode.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1"
+  }
+}

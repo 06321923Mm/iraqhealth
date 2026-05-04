@@ -15,6 +15,12 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localProperties.load(FileInputStream(localPropertiesFile))
+}
+
 android {
     namespace = "net.iraqhealth.app"
     compileSdk = flutter.compileSdkVersion
@@ -36,6 +42,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
+        manifestPlaceholders["MAPS_API_KEY"] =
+            localProperties.getProperty("MAPS_API_KEY", "")
     }
 
     if (keystorePropertiesFile.exists()) {
