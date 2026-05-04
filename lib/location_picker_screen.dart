@@ -57,6 +57,8 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
   bool _geoLoading = false;
   bool _searchBusy = false;
   bool _myLocationBusy = false;
+  double? _userBiasLat;
+  double? _userBiasLng;
 
   @override
   void initState() {
@@ -65,6 +67,40 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
     _latCtrl.text = _position.latitude.toStringAsFixed(6);
     _lngCtrl.text = _position.longitude.toStringAsFixed(6);
     _scheduleReverseGeocode();
+    unawaited(_loadUserBiasIfPermitted());
+  }
+
+  /// Silently fetches the user's current position (without prompting) so that
+  /// [_runPlaceSearch] can bias results. Falls through quietly on denial/error.
+  Future<void> _loadUserBiasIfPermitted() async {
+    if (kIsWeb) {
+      return;
+    }
+    try {
+      final bool enabled = await Geolocator.isLocationServiceEnabled();
+      if (!enabled) {
+        return;
+      }
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
+        return;
+      }
+      final Position p = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+        ),
+      ).timeout(const Duration(seconds: 8));
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _userBiasLat = p.latitude;
+        _userBiasLng = p.longitude;
+      });
+    } catch (_) {
+      // Intentional silent: the search still works globally without bias.
+    }
   }
 
   @override
@@ -138,8 +174,15 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
   Future<void> _runPlaceSearch() async {
     FocusScope.of(context).unfocus();
     setState(() => _searchBusy = true);
-    final LatLngName? hit =
-        await ForwardGeocodeService.searchFirst(_searchQueryCtrl.text);
+    // Prefer the user's actual location for biasing; fall back to the current
+    // marker position (works inside Iraq even before GPS resolves).
+    final double biasLat = _userBiasLat ?? _position.latitude;
+    final double biasLng = _userBiasLng ?? _position.longitude;
+    final LatLngName? hit = await ForwardGeocodeService.searchFirst(
+      _searchQueryCtrl.text,
+      biasLatitude: biasLat,
+      biasLongitude: biasLng,
+    );
     if (!mounted) {
       return;
     }

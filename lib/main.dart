@@ -23,6 +23,7 @@ import 'doctor_location_repository.dart';
 import 'doctor_model.dart';
 import 'location_picker_screen.dart';
 import 'widgets/doctor_map_location_field.dart';
+import 'widgets/inline_doctor_location_picker.dart';
 import 'arabic_search_normalize.dart';
 import 'favorites_provider.dart';
 import 'search_suggestions.dart';
@@ -193,6 +194,21 @@ const String kSupabaseReportsTable = 'reports';
 const String kSupabaseReportTotalsTable = 'doctor_report_totals';
 const String kSupabasePendingDoctorsTable = 'pending_doctors';
 const String kSupabaseDoctorsTable = 'doctors';
+
+/// أعمدة doctors المسموح للـ anon بتحديثها (مُطابِقة لـ GRANT في Supabase).
+/// تُستخدم للتحقق قبل «الموافقة السريعة» على اقتراحات التعديل.
+const Set<String> kAdminUpdatableDoctorColumns = <String>{
+  'name',
+  'spec',
+  'addr',
+  'ph',
+  'ph2',
+  'notes',
+  'area',
+  'gove',
+  'latitude',
+  'longitude',
+};
 
 // مفاتيح لعمود public.reports.info_issue_type
 const Map<String, String> kInfoCorrectionTypeLabels = <String, String>{
@@ -3863,12 +3879,36 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     }
   }
 
-  Future<void> _dismissReport(Map<String, dynamic> r) async {
+  /// حذف فعلي لصف الاقتراح من [kSupabaseReportsTable] بعد تأكيد المستخدم.
+  Future<void> _deleteReport(Map<String, dynamic> r) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: const Text('تأكيد حذف الاقتراح'),
+        content: const Text(
+          'هل تريد حذف هذا الاقتراح نهائياً؟ لا يمكن التراجع.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('حذف'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
     final int? docId = _adminReportTargetId(r);
     try {
       await _supabase
           .from(_adminReportsTable())
-          .update(<String, dynamic>{'status': kReportStatusDismissed})
+          .delete()
           .eq('id', r['id']);
       if (docId != null) {
         await _syncReportTotal(docId);
@@ -3877,7 +3917,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم رفض الاقتراح.')),
+        const SnackBar(content: Text('تم حذف الاقتراح.')),
       );
       await _loadDashboardData();
     } catch (error) {
@@ -3885,7 +3925,116 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشل الرفض: $error')),
+        SnackBar(content: Text('فشل الحذف: $error')),
+      );
+    }
+  }
+
+  /// موافقة سريعة: تطبيق «suggested_correction» تلقائياً على العمود المستهدف
+  /// بلا حوار، مع التحقق من كون العمود ضمن الحقول التي يُسمح للـ anon بتحديثها.
+  /// يستخدم تدفق الخرائط إذا كان الاقتراح إحداثيات.
+  Future<void> _approveReport(Map<String, dynamic> r) async {
+    final int? docId = _adminReportTargetId(r);
+    if (docId == null) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('لا يمكن تحديد الطبيب المستهدف لهذا الاقتراح.'),
+        ),
+      );
+      return;
+    }
+
+    // اقتراح موقع: نستخدم تدفق الخرائط الموجود (يستخدم suggested_latitude/longitude).
+    if (r['info_issue_type']?.toString() == 'wrong_map_location') {
+      final double? la = DoctorCoordinates.readSuggestedLatitude(r);
+      final double? ln = DoctorCoordinates.readSuggestedLongitude(r);
+      if (la != null && ln != null) {
+        await _commitMapLocationApproval(r, docId, la, ln);
+        return;
+      }
+      await _applyMapLocationFromReport(r, docId);
+      return;
+    }
+
+    // اقتراح نصي/رقمي: نطبّق suggested_correction على العمود المستهدف مباشرة.
+    final String? rawField = resolveReportTargetColumn(r);
+    final String? field = rawField?.isNotEmpty == true
+        ? rawField
+        : _fieldForIssueType(r['info_issue_type']?.toString());
+    if (field == null || field.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('لا يمكن تحديد الحقل المراد تعديله. استخدم «تعديل يدوي».'),
+        ),
+      );
+      return;
+    }
+    if (!kAdminUpdatableDoctorColumns.contains(field)) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'الحقل «$field» غير مسموح بتحديثه من لوحة الأدمن. '
+            'استخدم «تعديل يدوي» أو وسّع صلاحيات anon.',
+          ),
+        ),
+      );
+      return;
+    }
+    final String newValue = (r['suggested_correction'] ?? '').toString().trim();
+    if (newValue.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('الاقتراح لا يتضمّن قيمة جديدة. استخدم «تعديل يدوي».'),
+        ),
+      );
+      return;
+    }
+    await _commitCorrection(r, docId, field, newValue);
+  }
+
+  /// يطبّق الإحداثيات المقترحة على جدول الأطباء ويضع حالة الاقتراح resolved.
+  Future<void> _commitMapLocationApproval(
+    Map<String, dynamic> r,
+    int docId,
+    double la,
+    double ln,
+  ) async {
+    try {
+      await _supabase.from(_adminDoctorsEntityTable()).update(<String, dynamic>{
+        'latitude': la,
+        'longitude': ln,
+      }).eq('id', docId);
+      await _supabase.from(_adminReportsTable()).update(<String, dynamic>{
+        'status': kReportStatusResolved,
+      }).eq('id', r['id']);
+      await _syncReportTotal(docId);
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تمت الموافقة وتحديث موقع العيادة.'),
+        ),
+      );
+      await _loadDashboardData();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('فشلت الموافقة على الموقع: $error')),
       );
     }
   }
@@ -4323,9 +4472,11 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   }
 
   Future<void> _showAddDoctorDialog() async {
-    final Map<String, dynamic>? result = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (BuildContext ctx) => const _AddEditDoctorDialog(),
+    final Map<String, dynamic>? result =
+        await Navigator.of(context).push<Map<String, dynamic>>(
+      buildAdaptiveRtlRoute<Map<String, dynamic>>(
+        const _AddEditDoctorPage(),
+      ),
     );
     if (result != null) {
       await _directAddDoctor(result);
@@ -4333,9 +4484,11 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   }
 
   Future<void> _showEditDoctorDialog(Map<String, dynamic> doc) async {
-    final Map<String, dynamic>? result = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (BuildContext ctx) => _AddEditDoctorDialog(doc: doc),
+    final Map<String, dynamic>? result =
+        await Navigator.of(context).push<Map<String, dynamic>>(
+      buildAdaptiveRtlRoute<Map<String, dynamic>>(
+        _AddEditDoctorPage(doc: doc),
+      ),
     );
     if (result != null) {
       await _directEditDoctor(doc['id'], result);
@@ -4632,19 +4785,29 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
             child: Row(
               children: <Widget>[
                 Expanded(
-                  child: FilledButton(
-                    onPressed: () => _applyReportCorrection(r),
-                    child: const Text('تطبيق التصحيح'),
+                  child: FilledButton.icon(
+                    onPressed: () => _approveReport(r),
+                    icon: const Icon(Icons.check, size: 18),
+                    label: const Text('موافقة'),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 Expanded(
-                  child: OutlinedButton(
-                    onPressed: () => _dismissReport(r),
+                  child: OutlinedButton.icon(
+                    onPressed: () => _applyReportCorrection(r),
+                    icon: const Icon(Icons.tune, size: 18),
+                    label: const Text('تعديل يدوي'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _deleteReport(r),
+                    icon: const Icon(Icons.delete_outline, size: 18),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.red,
                     ),
-                    child: const Text('رفض'),
+                    label: const Text('حذف'),
                   ),
                 ),
               ],
@@ -4769,17 +4932,17 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   }
 }
 
-// ── فورم الإضافة/التعديل المشترك للأدمن (نفس حقول فورم + العامة) ────────────
+// ── صفحة الإضافة/التعديل الكاملة للأدمن (بديل الحوار — تستضيف الخريطة إنلاين) ─
 
-class _AddEditDoctorDialog extends StatefulWidget {
-  const _AddEditDoctorDialog({this.doc});
+class _AddEditDoctorPage extends StatefulWidget {
+  const _AddEditDoctorPage({this.doc});
   final Map<String, dynamic>? doc;
 
   @override
-  State<_AddEditDoctorDialog> createState() => _AddEditDoctorDialogState();
+  State<_AddEditDoctorPage> createState() => _AddEditDoctorPageState();
 }
 
-class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
+class _AddEditDoctorPageState extends State<_AddEditDoctorPage> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _physicianCustomCtrl;
   late final TextEditingController _imagingCustomCtrl;
@@ -4981,13 +5144,19 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
   @override
   Widget build(BuildContext context) {
     final bool isEdit = widget.doc != null;
-    return AlertDialog(
-      title: Text(isEdit
-          ? 'تعديل: ${widget.doc!['name'] ?? ''}'
-          : 'إضافة طبيب / عيادة'),
-      content: SizedBox(
-        width: double.maxFinite,
+    const Color primaryMedicalBlue = Color(0xFF42A5F5);
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEdit
+            ? 'تعديل: ${widget.doc!['name'] ?? ''}'
+            : 'إضافة طبيب / عيادة'),
+        backgroundColor: primaryMedicalBlue,
+        foregroundColor: Colors.white,
+        leading: const CloseButton(color: Colors.white),
+      ),
+      body: SafeArea(
         child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -5209,97 +5378,106 @@ class _AddEditDoctorDialogState extends State<_AddEditDoctorDialog> {
                 textAlign: TextAlign.right,
               ),
               const SizedBox(height: 8),
-              DoctorMapLocationField(
+              InlineDoctorLocationPicker(
                 latitude: _pickedLatitude,
                 longitude: _pickedLongitude,
-                mapTitle: widget.doc != null
+                title: widget.doc != null
                     ? 'تعديل موقع العيادة'
                     : 'اختيار موقع العيادة',
-                mandatory: true,
-                allowClear: false,
-                onChanged: (double? latitude, double? longitude) {
+                onChanged: (double latitude, double longitude) {
                   setState(() {
                     _pickedLatitude = latitude;
                     _pickedLongitude = longitude;
                   });
                 },
               ),
+              const SizedBox(height: 24),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('إلغاء'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: FilledButton(
+                      onPressed: _submitForm,
+                      child: Text(isEdit ? 'حفظ التعديل' : 'إضافة'),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('إلغاء'),
-        ),
-        FilledButton(
-          onPressed: () {
-            final String name = _nameCtrl.text.trim();
-            final String textAddr = _textAddrCtrl.text.trim();
-            final String ph = _phCtrl.text.trim();
-            final String notes = _notesCtrl.text.trim();
-            final String area = _buildArea();
-
-            String? error;
-            if (name.length < 2) {
-              error = 'أدخل اسم الطبيب أو المركز';
-            } else if (_medicalType == null) {
-              error = 'اختر المجال الطبي';
-            } else if (_medicalType == _MedicalFieldType.physician &&
-                !_physicianUseCustom &&
-                _selectedPhysicianSpec == null) {
-              error = 'اختر التخصص';
-            } else if (_medicalType == _MedicalFieldType.physician &&
-                _physicianUseCustom &&
-                _physicianCustomCtrl.text.trim().length < 2) {
-              error = 'أدخل التخصص';
-            } else if (_medicalType == _MedicalFieldType.radiology &&
-                !_imagingUseCustom &&
-                _selectedImagingType == null) {
-              error = 'اختر نوع الاشعة';
-            } else if (_medicalType == _MedicalFieldType.radiology &&
-                _imagingUseCustom &&
-                _imagingCustomCtrl.text.trim().length < 2) {
-              error = 'أدخل نوع الاشعة';
-            } else if (area.length < 2) {
-              error = 'أدخل المنطقة';
-            } else if (textAddr.length < 3) {
-              error = 'أدخل عنوان العيادة';
-            } else if (ph.length < 6) {
-              error = 'أدخل رقم الهاتف';
-            } else if (notes.length < 3) {
-              error = 'أدخل الملاحظات';
-            } else if (_pickedLatitude == null || _pickedLongitude == null) {
-              error = 'يجب تحديد موقع العيادة على خرائط Google';
-            }
-
-            if (error != null) {
-              ScaffoldMessenger.of(context)
-                  .showSnackBar(SnackBar(content: Text(error)));
-              return;
-            }
-
-            final Map<String, dynamic> row = <String, dynamic>{
-              'name': name,
-              'spec': _buildSpec(),
-              'gove': _selectedGove,
-              'area': area,
-              'addr': textAddr,
-              'ph': ph,
-              'ph2': _ph2Ctrl.text.trim(),
-              'notes': 'العنوان: $textAddr\n\nملاحظات: $notes',
-              ...DoctorCoordinates.supabasePair(
-                latitude: _pickedLatitude,
-                longitude: _pickedLongitude,
-              ),
-            };
-            Navigator.of(context).pop(row);
-          },
-          child: Text(isEdit ? 'حفظ التعديل' : 'إضافة'),
-        ),
-      ],
     );
+  }
+
+  void _submitForm() {
+    final String name = _nameCtrl.text.trim();
+    final String textAddr = _textAddrCtrl.text.trim();
+    final String ph = _phCtrl.text.trim();
+    final String notes = _notesCtrl.text.trim();
+    final String area = _buildArea();
+
+    String? error;
+    if (name.length < 2) {
+      error = 'أدخل اسم الطبيب أو المركز';
+    } else if (_medicalType == null) {
+      error = 'اختر المجال الطبي';
+    } else if (_medicalType == _MedicalFieldType.physician &&
+        !_physicianUseCustom &&
+        _selectedPhysicianSpec == null) {
+      error = 'اختر التخصص';
+    } else if (_medicalType == _MedicalFieldType.physician &&
+        _physicianUseCustom &&
+        _physicianCustomCtrl.text.trim().length < 2) {
+      error = 'أدخل التخصص';
+    } else if (_medicalType == _MedicalFieldType.radiology &&
+        !_imagingUseCustom &&
+        _selectedImagingType == null) {
+      error = 'اختر نوع الاشعة';
+    } else if (_medicalType == _MedicalFieldType.radiology &&
+        _imagingUseCustom &&
+        _imagingCustomCtrl.text.trim().length < 2) {
+      error = 'أدخل نوع الاشعة';
+    } else if (area.length < 2) {
+      error = 'أدخل المنطقة';
+    } else if (textAddr.length < 3) {
+      error = 'أدخل عنوان العيادة';
+    } else if (ph.length < 6) {
+      error = 'أدخل رقم الهاتف';
+    } else if (notes.length < 3) {
+      error = 'أدخل الملاحظات';
+    } else if (_pickedLatitude == null || _pickedLongitude == null) {
+      error = 'يجب تحديد موقع العيادة على خرائط Google';
+    }
+
+    if (error != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+
+    final Map<String, dynamic> row = <String, dynamic>{
+      'name': name,
+      'spec': _buildSpec(),
+      'gove': _selectedGove,
+      'area': area,
+      'addr': textAddr,
+      'ph': ph,
+      'ph2': _ph2Ctrl.text.trim(),
+      'notes': 'العنوان: $textAddr\n\nملاحظات: $notes',
+      ...DoctorCoordinates.supabasePair(
+        latitude: _pickedLatitude,
+        longitude: _pickedLongitude,
+      ),
+    };
+    Navigator.of(context).pop(row);
   }
 }
 
