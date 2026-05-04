@@ -28,6 +28,10 @@ workflows:
         script: |
           echo $FIREBASE_IOS_GOOGLE_SERVICES | base64 --decode > $CM_BUILD_DIR/ios/Runner/GoogleService-Info.plist
 
+      - name: Set up Maps API key
+        script: |
+          echo "MAPS_API_KEY=$GOOGLE_MAPS_IOS_KEY" > ios/Flutter/MapsApiKey.xcconfig
+
       - name: Install dependencies
         script: flutter pub get
 
@@ -50,8 +54,7 @@ workflows:
             --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
             --export-options-plist=/Users/builder/export_options.plist \
             --build-name=1.0.0 \
-            --build-number=$PROJECT_BUILD_NUMBER \
-            MAPS_API_KEY=$GOOGLE_MAPS_IOS_KEY
+            --build-number=$PROJECT_BUILD_NUMBER
 
     artifacts:
       - build/ios/ipa/*.ipa
