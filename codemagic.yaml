@@ -1,0 +1,67 @@
+workflows:
+  ios-release:
+    name: Iraq Health iOS Release
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      flutter: 3.41.6
+      xcode: latest
+      cocoapods: default
+      vars:
+        BUNDLE_ID: com.example.iraqHealth
+        APP_STORE_APPLE_ID: Automatic
+      groups:
+        - app_secrets        # SUPABASE_URL, SUPABASE_ANON_KEY, GOOGLE_MAPS_IOS_KEY
+        - firebase_ios       # FIREBASE_IOS_GOOGLE_SERVICES (base64 GoogleService-Info.plist)
+        - ios_signing        # CM_CERTIFICATE, CM_CERTIFICATE_PASSWORD, CM_PROVISIONING_PROFILE
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
+    scripts:
+      - name: Set up GoogleService-Info.plist
+        script: |
+          echo $FIREBASE_IOS_GOOGLE_SERVICES | base64 --decode > $CM_BUILD_DIR/ios/Runner/GoogleService-Info.plist
+
+      - name: Install dependencies
+        script: flutter pub get
+
+      - name: Install pods
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+
+      - name: Set up code signing
+        script: |
+          keychain initialize
+          certificate add --certificate /tmp/certificate.p12 --password $CM_CERTIFICATE_PASSWORD
+          profile add --profile /tmp/profile.mobileprovision
+        ignore_failure: true
+
+      - name: Build iOS IPA
+        script: |
+          flutter build ipa \
+            --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
+            --export-options-plist=/Users/builder/export_options.plist \
+            --build-name=1.0.0 \
+            --build-number=$PROJECT_BUILD_NUMBER \
+            MAPS_API_KEY=$GOOGLE_MAPS_IOS_KEY
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - flutter_drive.log
+
+    publishing:
+      email:
+        recipients:
+          - munntdher4015@gmail.com
+        notify:
+          success: true
+          failure: true
