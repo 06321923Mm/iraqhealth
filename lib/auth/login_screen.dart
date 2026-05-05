@@ -45,23 +45,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _signInWithFacebook() async {
-    setState(() => _busy = true);
-    try {
-      await _auth.signInWithFacebook();
-      // AuthGate يراقب onAuthStateChange ويتولى الانتقال تلقائياً
-    } on AuthException catch (e) {
-      _showErrorSnackBar(e.message);
-    } catch (e) {
-      _showErrorSnackBar(e.toString());
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  @override
+@override
   Widget build(BuildContext context) {
     const Color deepBlue = Color(0xFF1D3557);
     const Color accent = Color(0xFF42A5F5);
@@ -138,15 +122,6 @@ class _LoginScreenState extends State<LoginScreen> {
                         backgroundColor: Colors.white,
                         foregroundColor: const Color(0xFF4285F4),
                         borderColor: const Color(0xFFE0E0E0),
-                      ),
-                      const SizedBox(height: 14),
-                      _SocialButton(
-                        onPressed: _busy ? null : _signInWithFacebook,
-                        icon: FontAwesomeIcons.facebookF,
-                        label: 'الدخول عبر فيسبوك',
-                        backgroundColor: const Color(0xFF1877F2),
-                        foregroundColor: Colors.white,
-                        borderColor: const Color(0xFF1877F2),
                       ),
                       if (_busy) ...<Widget>[
                         const SizedBox(height: 28),

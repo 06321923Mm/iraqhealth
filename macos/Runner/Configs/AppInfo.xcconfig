@@ -7,8 +7,8 @@
 // The application's name. By default this is also the title of the Flutter window.
 PRODUCT_NAME = iraq_health
 
-// The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.example.iraqHealth
+// The application's bundle identifier (موحّد مع iOS/Android لمزوّدي الهوية مثل Google)
+PRODUCT_BUNDLE_IDENTIFIER = net.iraqhealth.app
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.

@@ -48,6 +48,8 @@ dependencies:
   http: ^1.2.0
   package_info_plus: ^8.0.0
   provider: ^6.1.2
+  google_sign_in: ^6.2.4
+  flutter_dotenv: ^5.2.1
 
 dev_dependencies:
   flutter_test:
@@ -71,6 +73,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/env/flutter.env
 
 flutter_launcher_icons:
   android: true

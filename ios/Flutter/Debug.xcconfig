@@ -1,2 +1,4 @@
 #include "Generated.xcconfig"
+// Fallback when MapsApiKey.xcconfig is missing; overridden if that file defines MAPS_API_KEY.
 MAPS_API_KEY=
+#include? "MapsApiKey.xcconfig"

@@ -1,0 +1,3 @@
+// Copy this file to MapsApiKey.xcconfig in the same folder (MapsApiKey.xcconfig is gitignored).
+// Use the same key as Android Maps SDK — enable "Maps SDK for iOS" in Google Cloud Console.
+MAPS_API_KEY=YOUR_IOS_MAPS_SDK_KEY_HERE

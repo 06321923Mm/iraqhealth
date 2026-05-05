@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- مطابقة لمعرّف عميل OAuth من نوع Web في Google Cloud؛ يستخدمه google_sign_in احتياطياً. -->
+    <string name="default_web_client_id">63970501606-ntgc1l1ercd3jj2uskn1kfs8tjo54vd7.apps.googleusercontent.com</string>
+</resources>

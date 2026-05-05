@@ -18,6 +18,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'analytics_service.dart';
 import 'app_navigation.dart';
+import 'auth/auth_gate.dart';
+import 'doctor_constants.dart';
+import 'doctor_dashboard/my_clinic_screen.dart';
+import 'env/app_env.dart';
 import 'data/doctor_coordinates.dart';
 import 'doctor_location_repository.dart';
 import 'doctor_model.dart';
@@ -29,7 +33,6 @@ import 'search_suggestions.dart';
 import 'firebase_options.dart';
 import 'pwa_install_stub.dart'
     if (dart.library.js) 'pwa_install_web.dart';
-import 'splash_screen.dart';
 import 'supabase_write_errors.dart';
 import 'edit_suggestion/edit_suggestion_schema_service.dart';
 import 'edit_suggestion/schema_models.dart';
@@ -38,27 +41,6 @@ import 'edit_suggestion/column_edit_semantics.dart';
 import 'edit_suggestion/arabic_column_label.dart';
 import 'widgets/dynamic_edit_suggestion_form.dart';
 
-const List<String> kGovernorates = <String>[
-  'بغداد',
-  'البصرة',
-  'الموصل',
-  'صلاح الدين',
-  'ذي قار',
-  'الديوانية',
-  'بابل',
-  'كربلاء',
-  'النجف',
-  'الأنبار',
-  'كركوك',
-  'ديالى',
-  'واسط',
-  'ميسان',
-  'المثنى',
-  'أربيل',
-  'دهوك',
-  'السليمانية',
-  'حلبجة',
-];
 
 const String kDropdownAddCustom = '__add_custom__';
 
@@ -70,44 +52,6 @@ enum _MedicalFieldType {
   lab,
 }
 
-/// قائمة التخصصات/الفئات المستخدمة في نموذج إضافة/تعديل العيادة.
-/// مرتّبة حسب التواجد الفعلي في قاعدة بيانات Supabase (الأكثر شيوعاً أولاً).
-/// يتم التحديث يدوياً من خلال مزامنة مع جدول public.doctors.
-const List<String> kPhysicianSpecializations = <String>[
-  'طب وتجميل الاسنان',
-  'النسائية',
-  'الباطنية',
-  'جراحة عامه',
-  'اختصاص الأطفال',
-  'الكسور و المفاصل',
-  'الاشعة والسونار',
-  'الجلدية و التجميلية',
-  'المختبرات الطبية',
-  'الاذن و الانف و الحنجرة',
-  'تخصصات اخرى',
-  'الصيدليات',
-  'طب وجراحة العيون',
-  'الجملة العصبية',
-  'عوينات لفحص البصر',
-  'القلبية',
-  'جراحة المجاري البولية',
-  'مراكز التجميل والليزر',
-  'المجمعات الطبية الخيرية',
-  'تجهيزات طبية',
-  'الباطنية - الأورام والغدد',
-  'اختصاص التغذية',
-  'الممرضين',
-  'المستشفيات الاهلية في البصرة',
-  'الباطنية - غدد الصماء والسكري',
-  'النفسية',
-  'أختصاص التخدير',
-  'الباطنية - أمراض الدم',
-  'عيادات الفسلجة العصبية لتخطيط الاعصاب والعضلات والدماغ',
-  'الباطنية - أمراض الكلى',
-  'الباطنية - الجهاز الهضمي',
-  'مراكز العقيم وأطفال الانابيب',
-  'مراكز الطب النووي فحوصات البتا سكان',
-];
 
 /// القيم القانونية (canonical) المخزّنة في عمود `spec` لتمييز فئات الأزرار
 /// السريعة في نموذج «إضافة/تعديل عيادة». تُستخدم في `_buildSpec()` و
@@ -257,6 +201,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  await AppEnv.loadAppEnv();
+
   if (!kIsWeb) {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
@@ -273,10 +219,13 @@ Future<void> main() async {
     await FirebaseMessaging.instance.requestPermission();
   }
 
+  // يُقرأ عنوان المشروع والمفتاح العام من AppEnv (assets/env/flutter.env أو --dart-define).
   await Supabase.initialize(
-    url: 'https://hygujebngiwemwujjcgm.supabase.co',
-    anonKey:
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5Z3VqZWJuZ2l3ZW13dWpqY2dtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3Njg1MjAsImV4cCI6MjA5MTM0NDUyMH0.p9hhJZ8L45ZqwQKuq5TCPWEa2xxBNl0AqHPQUjP1Xvs',
+    url: AppEnv.supabaseUrl,
+    anonKey: AppEnv.supabaseAnonKey,
+    authOptions: const FlutterAuthClientOptions(
+      authFlowType: AuthFlowType.pkce,
+    ),
   );
 
   runApp(
@@ -351,7 +300,7 @@ class IraqHealthApp extends StatelessWidget {
       },
       home: const Directionality(
         textDirection: TextDirection.rtl,
-        child: SplashScreen(),
+        child: AuthGate(),
       ),
     );
   }
@@ -1372,6 +1321,11 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             selectedIcon: Icon(Icons.favorite_rounded),
             label: 'أطبائي',
           ),
+          NavigationDestination(
+            icon: Icon(Icons.store_outlined),
+            selectedIcon: Icon(Icons.store_rounded),
+            label: 'عيادتي',
+          ),
         ],
       ),
       body: IndexedStack(
@@ -1650,6 +1604,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         ],
       ),
           _buildFavoritesTabContent(),
+          const MyClinicScreen(),
         ],
       ),
     );

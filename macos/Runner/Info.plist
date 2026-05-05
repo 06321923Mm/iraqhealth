@@ -28,5 +28,30 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>GIDClientID</key>
+	<string>63970501606-j9r8789mcj1i1j7fvt2c0gj50s247ejr.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>net.iraqhealth.app.supabase</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>net.iraqhealth.app</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.googleusercontent.apps.reversed-google-client-id</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.63970501606-j9r8789mcj1i1j7fvt2c0gj50s247ejr</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
