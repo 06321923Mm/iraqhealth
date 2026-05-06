@@ -1403,6 +1403,15 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                   _searchFieldVisible ? Icons.close : Icons.search,
                 ),
               ),
+              if (Supabase.instance.client.auth.currentUser
+                      ?.userMetadata?['role'] ==
+                  'admin')
+                IconButton(
+                  tooltip: 'لوحة الإدارة',
+                  onPressed: () =>
+                      Navigator.pushNamed(context, '/admin/hub'),
+                  icon: const Icon(Icons.admin_panel_settings_outlined),
+                ),
               if (kDebugMode && !kIsWeb)
                 PopupMenuButton<String>(
                   tooltip: 'أدوات التطوير',

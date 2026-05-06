@@ -19,13 +19,11 @@ class AdminHubPage extends StatefulWidget {
 }
 
 /// Returns true when the currently signed-in Supabase user carries
-/// `app_metadata.role = "admin"`. Requires no extra network call —
-/// the JWT payload already contains app_metadata.
+/// `raw_user_meta_data.role = "admin"`.
 bool _isAdminUser() {
   final User? user = Supabase.instance.client.auth.currentUser;
   if (user == null) return false;
-  // app_metadata is sourced from raw_app_meta_data in the JWT.
-  final dynamic role = user.appMetadata['role'];
+  final dynamic role = user.userMetadata?['role'];
   return role == 'admin';
 }
 
