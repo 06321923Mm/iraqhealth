@@ -50,6 +50,7 @@ dependencies:
   provider: ^6.1.2
   google_sign_in: ^6.2.4
   flutter_dotenv: ^5.2.1
+  image_picker: ^1.2.2
 
 dev_dependencies:
   flutter_test:

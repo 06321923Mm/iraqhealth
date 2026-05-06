@@ -40,7 +40,8 @@ import 'edit_suggestion/dynamic_report_insert.dart';
 import 'edit_suggestion/column_edit_semantics.dart';
 import 'edit_suggestion/arabic_column_label.dart';
 import 'widgets/dynamic_edit_suggestion_form.dart';
-
+import 'features/admin/presentation/layouts/admin_layout.dart';
+import 'services/fcm_token_service.dart';
 
 const String kDropdownAddCustom = '__add_custom__';
 
@@ -90,6 +91,8 @@ String get kAdminPassword {
   return '';
 }
 
+bool get _canBypassAdminPasswordInDebug => kDebugMode && kAdminPassword.isEmpty;
+
 /// Allowed `public.reports.status` values — must match `reports_status_check`
 /// constraint and RLS policies in Supabase migrations.
 const String kReportStatusPending = 'pending';
@@ -136,6 +139,7 @@ String _normalizeAdminPassword(String value) {
 const String kSupabaseReportsTable = 'reports';
 const String kSupabaseReportTotalsTable = 'doctor_report_totals';
 const String kSupabasePendingDoctorsTable = 'pending_doctors';
+const String kSupabaseClinicClaimRequestsTable = 'clinic_claim_requests';
 const String kSupabaseDoctorsTable = 'doctors';
 
 /// أعمدة doctors المسموح للـ anon بتحديثها (مُطابِقة لـ GRANT في Supabase).
@@ -296,6 +300,9 @@ class IraqHealthApp extends StatelessWidget {
             AdminDashboardPage(autoAuthenticated: fromHomeBypass),
           );
         }
+        if (settings.name == '/admin/hub') {
+          return buildAdaptiveRtlRoute<Object?>(const AdminHubPage());
+        }
         return null;
       },
       home: const Directionality(
@@ -332,6 +339,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   List<String> _areas = <String>[];
   List<String> _specializations = <String>[];
   int _adminTapCounter = 0;
+  Timer? _adminTapResetTimer;
 
   /// 0: الرئيسية، 1: أطبائي (المفضلة).
   int _homeNavIndex = 0;
@@ -355,6 +363,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       if (mounted) _checkForUpdate();
     });
     _loadDoctors();
+    // Register FCM token for push notifications (fire-and-forget, non-fatal).
+    FcmTokenService.register().ignore();
   }
 
   Future<void> _checkForUpdate() async {
@@ -830,12 +840,32 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   Future<void> _handleAdminTitleTap() async {
+    _adminTapResetTimer?.cancel();
+    _adminTapResetTimer = Timer(const Duration(seconds: 3), () {
+      _adminTapCounter = 0;
+    });
     _adminTapCounter += 1;
     if (_adminTapCounter < 4) {
       return;
     }
     _adminTapCounter = 0;
+    _adminTapResetTimer?.cancel();
     if (kAdminPassword.isEmpty) {
+      if (_canBypassAdminPasswordInDebug) {
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'وضع التطوير: تم فتح لوحة الأدمن بدون كلمة مرور (ADMIN_PASSWORD غير مكوّنة).',
+            ),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        Navigator.pushNamed(context, '/admin', arguments: true);
+        return;
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1273,6 +1303,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   @override
   void dispose() {
+    _adminTapResetTimer?.cancel();
     _suggestionDebounceTimer?.cancel();
     _searchAnalyticsDebounceTimer?.cancel();
     _searchController.removeListener(_onSearchTextChanged);
@@ -1350,12 +1381,16 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                   )
                 : null,
             title: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onTap: _handleAdminTitleTap,
-              child: const Text(
-                'المدار الطبي',
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 17,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Text(
+                  'المدار الطبي',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 17,
+                  ),
                 ),
               ),
             ),
@@ -3483,6 +3518,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
   late bool _authenticated;
   bool _isLoading = false;
   List<Map<String, dynamic>> _pendingDoctors = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _clinicClaimRequests = <Map<String, dynamic>>[];
   /// يُملأ من جدول التقارير الذي يحدّده RPC [app_edit_suggestion_schema_bundle].
   List<Map<String, dynamic>> _reportRows = <Map<String, dynamic>>[];
   List<Map<String, dynamic>> _searchedDoctors = <Map<String, dynamic>>[];
@@ -3561,6 +3597,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     final EditSuggestionSchemaBundle schemaBundle =
         await _reportSchemaService.loadBundle();
     List<Map<String, dynamic>> nextPending = <Map<String, dynamic>>[];
+    List<Map<String, dynamic>> nextClinicClaims = <Map<String, dynamic>>[];
     List<Map<String, dynamic>> nextReports = <Map<String, dynamic>>[];
     try {
       final List<dynamic> pending = await _supabase
@@ -3573,6 +3610,23 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('تعذر جلب طلبات العيادات: $error'),
+          ),
+        );
+      }
+    }
+    try {
+      final List<dynamic> claims = await _supabase
+          .from(kSupabaseClinicClaimRequestsTable)
+          .select('id, doctor_id, user_id, clinic_name, status, created_at')
+          .eq('status', 'pending')
+          .order('created_at', ascending: false)
+          .limit(200);
+      nextClinicClaims = claims.cast<Map<String, dynamic>>();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تعذر جلب طلبات استحواذ العيادات: $error'),
           ),
         );
       }
@@ -3601,6 +3655,7 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     }
     setState(() {
       _pendingDoctors = nextPending;
+      _clinicClaimRequests = nextClinicClaims;
       _reportRows = nextReports;
       _reportSchemaBundle = schemaBundle;
       _isLoading = false;
@@ -3961,13 +4016,28 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     double ln,
   ) async {
     try {
-      await _supabase.from(_adminDoctorsEntityTable()).update(<String, dynamic>{
-        'latitude': la,
-        'longitude': ln,
-      }).eq('id', docId);
-      await _supabase.from(_adminReportsTable()).update(<String, dynamic>{
-        'status': kReportStatusResolved,
-      }).eq('id', r['id']);
+      final List<dynamic> doctorUpdated = await _supabase
+          .from(_adminDoctorsEntityTable())
+          .update(<String, dynamic>{
+            'latitude': la,
+            'longitude': ln,
+          })
+          .eq('id', docId)
+          .select('id');
+      if (doctorUpdated.isEmpty) {
+        throw Exception('لم يتم تحديث بيانات الطبيب المستهدف.');
+      }
+      final List<dynamic> reportUpdated = await _supabase
+          .from(_adminReportsTable())
+          .update(<String, dynamic>{
+            'status': kReportStatusResolved,
+          })
+          .eq('id', r['id'])
+          .eq('status', kReportStatusPending)
+          .select('id');
+      if (reportUpdated.isEmpty) {
+        throw Exception('لم تتغير حالة الاقتراح (قد يكون عولج مسبقاً أو لا توجد صلاحية).');
+      }
       await _syncReportTotal(docId);
       if (!mounted) {
         return;
@@ -4030,13 +4100,28 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
       return;
     }
     try {
-      await _supabase.from(_adminDoctorsEntityTable()).update(<String, dynamic>{
-        'latitude': picked.latitude,
-        'longitude': picked.longitude,
-      }).eq('id', docId);
-      await _supabase.from(_adminReportsTable()).update(<String, dynamic>{
-        'status': kReportStatusResolved,
-      }).eq('id', r['id']);
+      final List<dynamic> doctorUpdated = await _supabase
+          .from(_adminDoctorsEntityTable())
+          .update(<String, dynamic>{
+            'latitude': picked.latitude,
+            'longitude': picked.longitude,
+          })
+          .eq('id', docId)
+          .select('id');
+      if (doctorUpdated.isEmpty) {
+        throw Exception('لم يتم تحديث بيانات الطبيب المستهدف.');
+      }
+      final List<dynamic> reportUpdated = await _supabase
+          .from(_adminReportsTable())
+          .update(<String, dynamic>{
+            'status': kReportStatusResolved,
+          })
+          .eq('id', r['id'])
+          .eq('status', kReportStatusPending)
+          .select('id');
+      if (reportUpdated.isEmpty) {
+        throw Exception('لم تتغير حالة الاقتراح (قد يكون عولج مسبقاً أو لا توجد صلاحية).');
+      }
       await _syncReportTotal(docId);
       if (!mounted) {
         return;
@@ -4234,14 +4319,23 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     String newValue,
   ) async {
     try {
-      await _supabase
+      final List<dynamic> doctorUpdated = await _supabase
           .from(_adminDoctorsEntityTable())
           .update(<String, dynamic>{field: newValue})
-          .eq('id', docId);
-      await _supabase
+          .eq('id', docId)
+          .select('id');
+      if (doctorUpdated.isEmpty) {
+        throw Exception('لم يتم تحديث بيانات الطبيب المستهدف.');
+      }
+      final List<dynamic> reportUpdated = await _supabase
           .from(_adminReportsTable())
           .update(<String, dynamic>{'status': kReportStatusResolved})
-          .eq('id', r['id']);
+          .eq('id', r['id'])
+          .eq('status', kReportStatusPending)
+          .select('id');
+      if (reportUpdated.isEmpty) {
+        throw Exception('لم تتغير حالة الاقتراح (قد يكون عولج مسبقاً أو لا توجد صلاحية).');
+      }
       await _syncReportTotal(docId);
       if (!mounted) {
         return;
@@ -4674,6 +4768,17 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
 
   void _tryLogin() {
     if (kAdminPassword.isEmpty) {
+      if (_canBypassAdminPasswordInDebug) {
+        setState(() => _authenticated = true);
+        _loadDashboardData();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('وضع التطوير: تم تجاوز كلمة المرور مؤقتًا.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -4768,6 +4873,62 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
     );
   }
 
+  Future<void> _approveClinicClaim(Map<String, dynamic> row) async {
+    try {
+      final List<dynamic> updated = await _supabase
+          .from(kSupabaseClinicClaimRequestsTable)
+          .update(<String, dynamic>{'status': 'approved'})
+          .eq('id', row['id'])
+          .eq('status', 'pending')
+          .select('id, status');
+      if (updated.isEmpty) {
+        throw Exception('تعذرت الموافقة: الطلب غير موجود أو عولج مسبقاً.');
+      }
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تمت الموافقة على الطلب وربط العيادة.')),
+      );
+      await _loadDashboardData();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('فشلت الموافقة على طلب الاستحواذ: $error')),
+      );
+    }
+  }
+
+  Future<void> _rejectClinicClaim(Map<String, dynamic> row) async {
+    try {
+      final List<dynamic> updated = await _supabase
+          .from(kSupabaseClinicClaimRequestsTable)
+          .update(<String, dynamic>{'status': 'rejected'})
+          .eq('id', row['id'])
+          .eq('status', 'pending')
+          .select('id, status');
+      if (updated.isEmpty) {
+        throw Exception('تعذر الرفض: الطلب غير موجود أو عولج مسبقاً.');
+      }
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم رفض طلب الاستحواذ.')),
+      );
+      await _loadDashboardData();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('فشل رفض طلب الاستحواذ: $error')),
+      );
+    }
+  }
+
   Widget _buildDashboardBody() {
     if (_isLoading) {
       return const TabBarView(
@@ -4822,8 +4983,20 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
                 )
               : ListView(
                   padding: const EdgeInsets.all(12),
-                  children: _pendingDoctors
-                      .map(
+                  children: <Widget>[
+                    if (_clinicClaimRequests.isNotEmpty) ...<Widget>[
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(4, 4, 4, 10),
+                        child: Text(
+                          'طلبات استحواذ العيادات',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1D3557),
+                          ),
+                        ),
+                      ),
+                      ..._clinicClaimRequests.map(
                         (Map<String, dynamic> item) => Card(
                           margin: const EdgeInsets.only(bottom: 8),
                           child: Padding(
@@ -4834,11 +5007,13 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
                               children: <Widget>[
                                 ListTile(
                                   title: Text(
-                                      (item['name'] ?? 'بدون اسم').toString()),
+                                    (item['clinic_name'] ?? '—').toString(),
+                                  ),
                                   subtitle: Text(
-                                    'التخصص: ${(item['spec'] ?? '').toString()}\n'
-                                    'المنطقة: ${(item['area'] ?? '').toString()}\n'
-                                    'المحافظة: ${(item['gove'] ?? '').toString()}',
+                                    'doctor_id: ${(item['doctor_id'] ?? '').toString()}\n'
+                                    'user_id: ${(item['user_id'] ?? '').toString()}\n'
+                                    'التاريخ: ${(item['created_at'] ?? '').toString()}',
+                                    style: const TextStyle(fontSize: 12),
                                   ),
                                   isThreeLine: true,
                                 ),
@@ -4850,17 +5025,16 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
                                       Expanded(
                                         child: FilledButton(
                                           onPressed: () =>
-                                              _approveRequest(item),
-                                          child: const Text('موافق (إضافة)'),
+                                              _approveClinicClaim(item),
+                                          child: const Text('موافقة وربط'),
                                         ),
                                       ),
                                       const SizedBox(width: 10),
                                       Expanded(
                                         child: OutlinedButton(
                                           onPressed: () =>
-                                              _rejectRequest(item),
-                                          child:
-                                              const Text('غير موافق (حذف)'),
+                                              _rejectClinicClaim(item),
+                                          child: const Text('رفض'),
                                         ),
                                       ),
                                     ],
@@ -4870,8 +5044,67 @@ class _AdminDashboardPageState extends State<AdminDashboardPage> {
                             ),
                           ),
                         ),
-                      )
-                      .toList(),
+                      ),
+                      const Divider(height: 28),
+                    ],
+                    if (_pendingDoctors.isNotEmpty)
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(4, 0, 4, 10),
+                        child: Text(
+                          'طلبات إضافة عيادات',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF1D3557),
+                          ),
+                        ),
+                      ),
+                    ..._pendingDoctors.map((Map<String, dynamic> item) {
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 8, horizontal: 4),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: <Widget>[
+                              ListTile(
+                                title:
+                                    Text((item['name'] ?? 'بدون اسم').toString()),
+                                subtitle: Text(
+                                  'التخصص: ${(item['spec'] ?? '').toString()}\n'
+                                  'المنطقة: ${(item['area'] ?? '').toString()}\n'
+                                  'المحافظة: ${(item['gove'] ?? '').toString()}',
+                                ),
+                                isThreeLine: true,
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    left: 8, right: 8, bottom: 8),
+                                child: Row(
+                                  children: <Widget>[
+                                    Expanded(
+                                      child: FilledButton(
+                                        onPressed: () => _approveRequest(item),
+                                        child: const Text('موافق (إضافة)'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: () => _rejectRequest(item),
+                                        child: const Text('غير موافق (حذف)'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                  ],
                 ),
         ),
 
