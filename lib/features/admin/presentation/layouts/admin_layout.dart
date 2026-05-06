@@ -8,9 +8,9 @@ import '../screens/verification_review_screen.dart';
 
 enum _AdminSection { dashboard, verification, clinics }
 
-/// Entry point for the new admin hub.
-/// Guards access by checking `app_metadata.role == "admin"` on the current
-/// Supabase user. Falls back to an access-denied screen.
+/// Entry point for the admin hub.
+/// Double-guards access: the route handler in main.dart is the primary gate;
+/// initState provides defense-in-depth by redirecting if the role check fails.
 class AdminHubPage extends StatefulWidget {
   const AdminHubPage({super.key});
 
@@ -18,17 +18,23 @@ class AdminHubPage extends StatefulWidget {
   State<AdminHubPage> createState() => _AdminHubPageState();
 }
 
-/// Returns true when the currently signed-in Supabase user carries
-/// `raw_user_meta_data.role = "admin"`.
-bool _isAdminUser() {
-  final User? user = Supabase.instance.client.auth.currentUser;
-  if (user == null) return false;
-  final dynamic role = user.userMetadata?['role'];
-  return role == 'admin';
-}
-
 class _AdminHubPageState extends State<AdminHubPage> {
   _AdminSection _section = _AdminSection.dashboard;
+  bool _isChecking = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final User? user = Supabase.instance.client.auth.currentUser;
+      if (user == null || user.userMetadata?['role'] != 'admin') {
+        Navigator.of(context).pushReplacementNamed('/home');
+        return;
+      }
+      setState(() => _isChecking = false);
+    });
+  }
 
   static const List<({_AdminSection section, IconData icon, String label})>
       _kItems = <({_AdminSection section, IconData icon, String label})>[
@@ -47,9 +53,13 @@ class _AdminHubPageState extends State<AdminHubPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Guard: only users with app_metadata.role = "admin" may enter.
-    if (!_isAdminUser()) {
-      return _AccessDeniedPage();
+    if (_isChecking) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF1D3557),
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF42A5F5)),
+        ),
+      );
     }
 
     final bool wide = MediaQuery.of(context).size.width >= 800;
@@ -224,71 +234,3 @@ class _SidebarItem extends StatelessWidget {
   }
 }
 
-// ── Access-denied screen shown when the user lacks the admin role ─────────────
-
-class _AccessDeniedPage extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        backgroundColor: const Color(0xFFF7FBFF),
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: const BoxDecoration(
-                    color: Color(0xFFFFEBEE),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.lock_outline,
-                    size: 48,
-                    color: Color(0xFFC62828),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'غير مصرّح بالدخول',
-                  style: GoogleFonts.cairo(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                    color: const Color(0xFF1D3557),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'هذه الصفحة مخصصة للمشرفين فقط.\n'
-                  'يجب أن يحمل حسابك صلاحية "admin" للوصول إلى لوحة الإدارة.',
-                  textAlign: TextAlign.center,
-                  style: GoogleFonts.cairo(
-                    fontSize: 14,
-                    color: const Color(0xFF607D8B),
-                    height: 1.6,
-                  ),
-                ),
-                const SizedBox(height: 28),
-                OutlinedButton.icon(
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.arrow_back_ios_new, size: 16),
-                  label: Text(
-                    'العودة',
-                    style: GoogleFonts.cairo(fontWeight: FontWeight.w600),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}

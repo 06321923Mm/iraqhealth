@@ -295,12 +295,36 @@ class IraqHealthApp extends StatelessWidget {
           return buildAdaptiveRtlRoute<Object?>(const ReportPage());
         }
         if (settings.name == '/admin') {
+          final User? guardUser = Supabase.instance.client.auth.currentUser;
+          if (guardUser == null) {
+            return buildAdaptiveRtlRoute<Object?>(const AuthGate());
+          }
+          if (guardUser.userMetadata?['role'] != 'admin') {
+            return buildAdaptiveRtlRoute<Object?>(
+              const Directionality(
+                textDirection: TextDirection.rtl,
+                child: IraqHealthHomePage(),
+              ),
+            );
+          }
           final bool fromHomeBypass = settings.arguments == true;
           return buildAdaptiveRtlRoute<Object?>(
             AdminDashboardPage(autoAuthenticated: fromHomeBypass),
           );
         }
         if (settings.name == '/admin/hub') {
+          final User? guardUser = Supabase.instance.client.auth.currentUser;
+          if (guardUser == null) {
+            return buildAdaptiveRtlRoute<Object?>(const AuthGate());
+          }
+          if (guardUser.userMetadata?['role'] != 'admin') {
+            return buildAdaptiveRtlRoute<Object?>(
+              const Directionality(
+                textDirection: TextDirection.rtl,
+                child: IraqHealthHomePage(),
+              ),
+            );
+          }
           return buildAdaptiveRtlRoute<Object?>(const AdminHubPage());
         }
         return null;
