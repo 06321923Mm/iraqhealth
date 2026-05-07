@@ -33,9 +33,7 @@ jobs:
         run: flutter pub get
 
       - name: Build web
-        env:
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-        run: flutter build web --release --base-href / --dart-define=ADMIN_PASSWORD="$ADMIN_PASSWORD"
+        run: flutter build web --release --base-href /
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

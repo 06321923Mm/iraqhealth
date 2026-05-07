@@ -307,24 +307,6 @@ class IraqHealthApp extends StatelessWidget {
               ),
             );
           }
-          final bool fromHomeBypass = settings.arguments == true;
-          return buildAdaptiveRtlRoute<Object?>(
-            AdminDashboardPage(autoAuthenticated: fromHomeBypass),
-          );
-        }
-        if (settings.name == '/admin/hub') {
-          final User? guardUser = Supabase.instance.client.auth.currentUser;
-          if (guardUser == null) {
-            return buildAdaptiveRtlRoute<Object?>(const AuthGate());
-          }
-          if (guardUser.userMetadata?['role'] != 'admin') {
-            return buildAdaptiveRtlRoute<Object?>(
-              const Directionality(
-                textDirection: TextDirection.rtl,
-                child: IraqHealthHomePage(),
-              ),
-            );
-          }
           return buildAdaptiveRtlRoute<Object?>(const AdminHubPage());
         }
         return null;
@@ -1433,7 +1415,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                 IconButton(
                   tooltip: 'لوحة الإدارة',
                   onPressed: () =>
-                      Navigator.pushNamed(context, '/admin/hub'),
+                      Navigator.pushNamed(context, '/admin'),
                   icon: const Icon(Icons.admin_panel_settings_outlined),
                 ),
               if (kDebugMode && !kIsWeb)

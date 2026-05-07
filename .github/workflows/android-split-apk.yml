@@ -72,11 +72,7 @@ jobs:
         run: flutter pub get
 
       - name: Build APKs (split per ABI)
-        env:
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-        run: >
-          flutter build apk --release --split-per-abi
-          --dart-define=ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+        run: flutter build apk --release --split-per-abi
 
       - name: Upload split APK artifacts
         uses: actions/upload-artifact@v4
