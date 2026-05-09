@@ -1,0 +1,43 @@
+name: RLS Integration Tests
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - 'supabase/migrations/**'
+      - 'integration_test/rls_test.dart'
+  pull_request:
+    paths:
+      - 'supabase/migrations/**'
+      - 'integration_test/rls_test.dart'
+
+jobs:
+  rls-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run RLS Integration Tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 31
+          arch: x86_64
+          profile: Nexus 6
+          script: |
+            flutter test integration_test/rls_test.dart \
+              --dart-define=SUPABASE_TEST_URL=${{ secrets.SUPABASE_TEST_URL }} \
+              --dart-define=SUPABASE_TEST_ANON_KEY=${{ secrets.SUPABASE_TEST_ANON_KEY }} \
+              --dart-define=SUPABASE_TEST_USER_EMAIL=${{ secrets.SUPABASE_TEST_USER_EMAIL }} \
+              --dart-define=SUPABASE_TEST_USER_PASS=${{ secrets.SUPABASE_TEST_USER_PASS }} \
+              --dart-define=SUPABASE_TEST_ADMIN_EMAIL=${{ secrets.SUPABASE_TEST_ADMIN_EMAIL }} \
+              --dart-define=SUPABASE_TEST_ADMIN_PASS=${{ secrets.SUPABASE_TEST_ADMIN_PASS }}
