@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="/">
+
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="المدار الطبي - دليل الأطباء والعيادات في العراق">
+
+  <!-- PWA / mobile -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="المدار الطبي">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+  <title>المدار الطبي</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Google Maps JavaScript API — required for map picker on web -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAeJbTEz38PfgT0tgo-pIeyCRyvtzo57Zo"></script>
+
+</head>
+<body>
+  <!-- Restore URL after GitHub Pages 404 redirect -->
+  <script>
+    (function () {
+      var redirect = sessionStorage.getItem('ghpages_redirect');
+      if (redirect) {
+        sessionStorage.removeItem('ghpages_redirect');
+        history.replaceState(null, null, redirect);
+      }
+    })();
+  </script>
+
+  <script src="flutter_bootstrap.js" async></script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+    import { getAnalytics }   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-analytics.js";
+
+    const firebaseConfig = {
+      apiKey:            "AIzaSyBI1aJOsgX9bfsT7NNO4vXaP0DospW0JpQ",
+      authDomain:        "iraqhealth-b08f6.firebaseapp.com",
+      projectId:         "iraqhealth-b08f6",
+      storageBucket:     "iraqhealth-b08f6.firebasestorage.app",
+      messagingSenderId: "63970501606",
+      appId:             "1:63970501606:web:f13f9990483dee8b50ec27",
+      measurementId:     "G-P3F5TRGJFY",
+    };
+
+    const app = initializeApp(firebaseConfig);
+    getAnalytics(app);
+  </script>
+
+  <script>
+    var _pwaPrompt = null;
+
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      _pwaPrompt = e;
+    });
+
+    // Returns true if native install prompt was shown, false if not available.
+    function pwaInstall() {
+      if (!_pwaPrompt) return false;
+      _pwaPrompt.prompt();
+      _pwaPrompt.userChoice.then(function () { _pwaPrompt = null; });
+      return true;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تحميل تطبيق المدار الطبي</title>
+  <meta name="description" content="حمّل تطبيق المدار الطبي على هاتفك الأندرويد">
+  <link rel="icon" type="image/png" href="../favicon.png">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 20px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+      max-width: 420px;
+      width: 100%;
+      padding: 40px 32px;
+      text-align: center;
+    }
+
+    .app-icon {
+      width: 96px;
+      height: 96px;
+      border-radius: 22px;
+      background: linear-gradient(135deg, #1976D2, #42A5F5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+      box-shadow: 0 4px 16px rgba(25,118,210,0.35);
+    }
+
+    .app-icon svg { width: 52px; height: 52px; fill: #fff; }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #1a1a2e;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: #666;
+      font-size: 0.95rem;
+      margin-bottom: 28px;
+      line-height: 1.5;
+    }
+
+    .android-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #e8f5e9;
+      color: #2e7d32;
+      border: 1.5px solid #a5d6a7;
+      border-radius: 50px;
+      padding: 6px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 28px;
+    }
+
+    .android-badge svg { width: 18px; height: 18px; fill: #2e7d32; flex-shrink: 0; }
+
+    .download-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: linear-gradient(135deg, #1976D2, #1565C0);
+      color: #fff;
+      text-decoration: none;
+      border-radius: 14px;
+      padding: 16px 28px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      width: 100%;
+      transition: transform 0.15s, box-shadow 0.15s;
+      box-shadow: 0 4px 16px rgba(25,118,210,0.4);
+    }
+
+    .download-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(25,118,210,0.45);
+    }
+
+    .download-btn:active { transform: translateY(0); }
+
+    .download-btn svg { width: 26px; height: 26px; fill: #fff; flex-shrink: 0; }
+
+    .file-info {
+      margin-top: 16px;
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      color: #999;
+      font-size: 0.82rem;
+    }
+
+    .file-info span { display: flex; align-items: center; gap: 4px; }
+
+    .steps {
+      margin-top: 28px;
+      background: #f8f9fa;
+      border-radius: 12px;
+      padding: 18px 20px;
+      text-align: right;
+    }
+
+    .steps h3 {
+      font-size: 0.9rem;
+      color: #444;
+      margin-bottom: 12px;
+      font-weight: 700;
+    }
+
+    .steps ol {
+      padding-right: 18px;
+      color: #666;
+      font-size: 0.85rem;
+      line-height: 1.9;
+    }
+
+    .footer {
+      margin-top: 24px;
+      color: #bbb;
+      font-size: 0.78rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+
+    <div class="app-icon">
+      <!-- medical cross icon -->
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+      </svg>
+    </div>
+
+    <h1>المدار الطبي</h1>
+    <p class="subtitle">دليل الأطباء والعيادات في العراق<br>ابحث عن طبيبك القريب بسهولة</p>
+
+    <div class="android-badge">
+      <!-- Android robot icon -->
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M6 18c0 .55.45 1 1 1h1v3.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5V19h2v3.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5V19h1c.55 0 1-.45 1-1V8H6v10zm-2.5-1C2.67 17 2 17.67 2 18.5v-7C2 10.67 2.67 10 3.5 10S5 10.67 5 11.5v7c0 .83-.67 1.5-1.5 1.5zm17 0c-.83 0-1.5-.67-1.5-1.5v-7c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v7c0 .83-.67 1.5-1.5 1.5zM15.53 2.16l1.3-1.3c.2-.2.2-.51 0-.71-.2-.2-.51-.2-.71 0l-1.48 1.48C13.85 1.23 12.95 1 12 1c-.96 0-1.86.23-2.66.63L7.85.15c-.2-.2-.51-.2-.71 0-.2.2-.2.51 0 .71l1.31 1.31C7.14 3.14 6 4.96 6 7h12c0-2.04-1.14-3.86-2.47-4.84zM10 5H9V4h1v1zm5 0h-1V4h1v1z"/>
+      </svg>
+      تطبيق أندرويد
+    </div>
+
+    <a class="download-btn" href="../%D8%A7%D9%84%D9%85%D8%AF%D8%A7%D8%B1%20%D8%A7%D9%84%D8%B7%D8%A8%D9%8A.apk" download="المدار الطبي.apk">
+      <!-- download icon -->
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M5 20h14v-2H5v2zm7-18l-7 7h4v6h6v-6h4z" transform="rotate(180 12 12)"/>
+        <path d="M19 9h-4V3H9v6H5l7 7 7-7z"/>
+      </svg>
+      تحميل التطبيق
+    </a>
+
+    <div class="file-info">
+      <span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="#aaa"><path d="M6 2c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6H6zm7 7V3.5L18.5 9H13z"/></svg>
+        APK
+      </span>
+      <span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="#aaa"><path d="M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2h-1V1h-2zm3 18H5V8h14v11z"/></svg>
+        أندرويد 6.0+
+      </span>
+    </div>
+
+    <div class="steps">
+      <h3>خطوات التثبيت</h3>
+      <ol>
+        <li>اضغط زر التحميل أعلاه</li>
+        <li>افتح الملف بعد اكتمال التحميل</li>
+        <li>اسمح بتثبيت التطبيقات من مصادر غير معروفة إذا طُلب منك</li>
+        <li>اتبع خطوات التثبيت وافتح التطبيق</li>
+      </ol>
+    </div>
+
+    <p class="footer">iraqhealth.net &nbsp;·&nbsp; المدار الطبي &copy; 2026 &nbsp;·&nbsp; v1.0.0</p>
+  </div>
+</body>
+</html>
