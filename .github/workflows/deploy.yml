@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+# Required when the repo uses restricted default workflow permissions: gh-pages deploy pushes a branch.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
