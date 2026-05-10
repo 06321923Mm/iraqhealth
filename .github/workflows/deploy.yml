@@ -35,6 +35,9 @@ jobs:
       - name: Build web
         run: flutter build web --release --base-href /
 
+      - name: Ensure CNAME is in build output
+        run: cp web/CNAME build/web/CNAME
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
