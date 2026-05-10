@@ -2,11 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../app_navigation.dart';
 import '../../../../arabic_search_normalize.dart';
 import '../../../../core/components/status_badge.dart';
 import '../../../../core/components/verification_badge.dart';
 import '../../../../core/config/app_endpoints.dart';
 import '../../../../doctor_constants.dart';
+import '../../../../supabase_write_errors.dart';
+import 'add_edit_doctor_screen.dart';
 
 class ClinicsManagementScreen extends StatefulWidget {
   const ClinicsManagementScreen({super.key});
@@ -102,26 +105,139 @@ class _ClinicsManagementScreenState extends State<ClinicsManagementScreen> {
     _load(reset: false);
   }
 
+  Future<void> _runWithSavingOverlay(Future<void> Function() job) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (BuildContext ctx) {
+        return PopScope(
+          canPop: false,
+          child: Center(
+            child: Card(
+              elevation: 8,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const <Widget>[
+                    CircularProgressIndicator(),
+                    SizedBox(height: 18),
+                    Text('جاري الحفظ...'),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    try {
+      await job();
+    } finally {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+  }
+
+  Future<void> _directAddDoctor(Map<String, dynamic> data) async {
+    await _runWithSavingOverlay(() async {
+      try {
+        await _db.from(AppEndpoints.doctors).insert(data);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تمت الإضافة بنجاح.')),
+        );
+        await _load(reset: true);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(humanReadableSupabaseWriteError(e))),
+          );
+        }
+      }
+    });
+  }
+
+  Future<void> _directEditDoctor(
+    dynamic docId,
+    Map<String, dynamic> updates,
+  ) async {
+    await _runWithSavingOverlay(() async {
+      try {
+        await _db.from(AppEndpoints.doctors).update(updates).eq('id', docId);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم التعديل بنجاح.')),
+        );
+        await _load(reset: true);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(humanReadableSupabaseWriteError(e))),
+          );
+        }
+      }
+    });
+  }
+
+  Future<void> _showAddDoctorDialog() async {
+    final Map<String, dynamic>? result =
+        await Navigator.of(context, rootNavigator: true)
+            .push<Map<String, dynamic>>(
+      buildAdaptiveRtlRoute<Map<String, dynamic>>(
+        const AddEditDoctorPage(),
+      ),
+    );
+    if (result != null) {
+      await _directAddDoctor(result);
+    }
+  }
+
+  Future<void> _showEditDoctorDialog(Map<String, dynamic> doc) async {
+    final Map<String, dynamic>? result =
+        await Navigator.of(context, rootNavigator: true)
+            .push<Map<String, dynamic>>(
+      buildAdaptiveRtlRoute<Map<String, dynamic>>(
+        AddEditDoctorPage(doc: doc),
+      ),
+    );
+    if (result != null) {
+      await _directEditDoctor(doc['id'], result);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    const Color primaryMedicalBlue = Color(0xFF42A5F5);
     return Directionality(
       textDirection: TextDirection.rtl,
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            _buildHeader(),
-            const SizedBox(height: 12),
-            _buildFilters(),
-            const SizedBox(height: 12),
-            Expanded(
-              child: _loading && _rows.isEmpty
-                  ? const Center(child: CircularProgressIndicator())
-                  : _buildTable(),
-            ),
-            _buildPagination(),
-          ],
+      child: Scaffold(
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: _showAddDoctorDialog,
+          backgroundColor: primaryMedicalBlue,
+          foregroundColor: Colors.white,
+          icon: const Icon(Icons.person_add),
+          label: Text('إضافة طبيب', style: GoogleFonts.cairo()),
+        ),
+        body: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              _buildHeader(),
+              const SizedBox(height: 12),
+              _buildFilters(),
+              const SizedBox(height: 12),
+              Expanded(
+                child: _loading && _rows.isEmpty
+                    ? const Center(child: CircularProgressIndicator())
+                    : _buildTable(),
+              ),
+              _buildPagination(),
+            ],
+          ),
         ),
       ),
     );
@@ -227,13 +343,16 @@ class _ClinicsManagementScreenState extends State<ClinicsManagementScreen> {
             dataTextStyle: GoogleFonts.cairo(fontSize: 13, color: const Color(0xFF1D3557)),
             columnSpacing: 20,
             horizontalMargin: 16,
-            columns: const <DataColumn>[
-              DataColumn(label: Text('#')),
-              DataColumn(label: Text('الاسم')),
-              DataColumn(label: Text('التخصص')),
-              DataColumn(label: Text('المنطقة')),
-              DataColumn(label: Text('الحالة')),
-              DataColumn(label: Text('موثّق')),
+            columns: <DataColumn>[
+              const DataColumn(label: Text('#')),
+              const DataColumn(label: Text('الاسم')),
+              const DataColumn(label: Text('التخصص')),
+              const DataColumn(label: Text('المنطقة')),
+              const DataColumn(label: Text('الحالة')),
+              const DataColumn(label: Text('موثّق')),
+              DataColumn(
+                label: Text('إجراءات', style: GoogleFonts.cairo(fontWeight: FontWeight.w700)),
+              ),
             ],
             rows: _rows.asMap().entries.map((MapEntry<int, Map<String, dynamic>> entry) {
               final Map<String, dynamic> row = entry.value;
@@ -264,6 +383,13 @@ class _ClinicsManagementScreenState extends State<ClinicsManagementScreen> {
                   )),
                   DataCell(isVerified ? StatusBadge(status: status) : const SizedBox.shrink()),
                   DataCell(isVerified ? const VerificationBadge() : const SizedBox.shrink()),
+                  DataCell(
+                    IconButton(
+                      tooltip: 'تعديل',
+                      icon: const Icon(Icons.edit_outlined, color: Color(0xFF42A5F5)),
+                      onPressed: () => _showEditDoctorDialog(row),
+                    ),
+                  ),
                 ],
               );
             }).toList(),

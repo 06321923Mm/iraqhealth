@@ -1,0 +1,77 @@
+# ✅ VERIFIED 2026-05-09 — All required steps present (AAB + split APKs, secrets, triggers)
+name: Release Build (AAB + APK)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-aab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Write google-services.json
+        env:
+          JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "${JSON}" ]; then
+            echo "::error::Secret GOOGLE_SERVICES_JSON is not set."
+            exit 1
+          fi
+          printf '%s' "$JSON" > android/app/google-services.json
+
+      - name: Write local.properties (Maps API key)
+        env:
+          KEY: ${{ secrets.MAPS_API_KEY }}
+        run: |
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" >> android/local.properties
+          if [ -n "${KEY}" ]; then
+            echo "MAPS_API_KEY=${KEY}" >> android/local.properties
+          fi
+
+      - name: Optional signing files
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+          KP: ${{ secrets.KEY_PROPERTIES }}
+        run: |
+          if [ -n "${KS}" ] && [ -n "${KP}" ]; then
+            echo "${KS}" | base64 -d > android/upload-keystore.jks
+            printf '%s\n' "${KP}" > android/key.properties
+          fi
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: Build App Bundle (AAB)
+        run: flutter build appbundle --release
+
+      - name: Build split APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab-${{ github.sha }}
+          path: build/app/outputs/bundle/release/app-release.aab
+
+      - name: Upload split APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apks-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/*-release.apk
+          if-no-files-found: error

@@ -1,462 +1,410 @@
+// ✅ UPDATED 2026-05-09
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../core/config/app_endpoints.dart';
-import '../../../../features/verification/data/models/verification_request_model.dart';
+import '../../../../features/verification/data/repositories/verification_repository.dart';
 
 class VerificationReviewScreen extends StatefulWidget {
   const VerificationReviewScreen({super.key});
 
   @override
-  State<VerificationReviewScreen> createState() =>
-      _VerificationReviewScreenState();
+  State<VerificationReviewScreen> createState() => _VerificationReviewScreenState();
 }
 
 class _VerificationReviewScreenState extends State<VerificationReviewScreen> {
   final SupabaseClient _db = Supabase.instance.client;
-
-  VerificationStatus _filterStatus = VerificationStatus.pending;
-  List<Map<String, dynamic>> _requests = <Map<String, dynamic>>[];
+  late final VerificationRepository _repo = VerificationRepository(_db);
   bool _loading = true;
-  Map<String, dynamic>? _selected;
-
-  // Signed URLs cache
-  final Map<String, String> _signedUrls = <String, String>{};
-  bool _loadingUrls = false;
+  List<Map<String, dynamic>> _rows = <Map<String, dynamic>>[];
 
   @override
   void initState() {
     super.initState();
-    _loadRequests();
+    _load();
   }
 
-  Future<void> _loadRequests() async {
-    setState(() { _loading = true; _selected = null; });
-    try {
-      final List<dynamic> rows = await _db
-          .from(AppEndpoints.verificationRequests)
-          .select('*, doctors!inner(name, spec, gove, ph)')
-          .eq('status', _filterStatus.value)
-          .order('created_at', ascending: false)
-          .limit(100);
-      if (!mounted) return;
-      setState(() {
-        _requests = rows.cast<Map<String, dynamic>>();
-        _loading  = false;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _selectRequest(Map<String, dynamic> req) async {
-    setState(() { _selected = req; _loadingUrls = true; _signedUrls.clear(); });
-    final String? uid = req['doctor_id'] as String?;
-    if (uid == null) { setState(() => _loadingUrls = false); return; }
-
-    for (final String field in <String>['id_card_front_url', 'id_card_back_url', 'medical_license_url']) {
-      final String? path = req[field] as String?;
-      if (path != null && path.isNotEmpty) {
-        try {
-          final String url = await _db.storage
-              .from(AppEndpoints.verificationDocs)
-              .createSignedUrl(path, 3600);
-          if (mounted) setState(() => _signedUrls[field] = url);
-        } catch (_) {}
-      }
-    }
-    if (mounted) setState(() => _loadingUrls = false);
-  }
-
-  Future<void> _approve(String requestId, String doctorId) async {
-    try {
-      await _db.from(AppEndpoints.verificationRequests).update(<String, dynamic>{
-        'status': 'approved',
-      }).eq('id', requestId);
-
-      _db.functions.invoke(
-        'send-notification',
-        body: <String, dynamic>{
-          'user_id': doctorId,
-          'title':   'تم قبول طلب التوثيق',
-          'body':    'تهانينا! تم توثيق حسابك ويمكنك الآن إدارة عيادتك بالكامل.',
-          'data':    <String, String>{'type': 'verification_approved'},
-        },
-      ).ignore();
-
-      _snack('تمت الموافقة على الطلب.');
-      _loadRequests();
-    } catch (e) {
-      _snack('خطأ: ${e.toString()}');
-    }
-  }
-
-  Future<void> _reject(String requestId) async {
-    final TextEditingController notesCtrl = TextEditingController();
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: AlertDialog(
-          title: Text('رفض الطلب', style: GoogleFonts.cairo(fontWeight: FontWeight.w700)),
-          content: TextField(
-            controller: notesCtrl,
-            textDirection: TextDirection.rtl,
-            maxLines: 3,
-            decoration: InputDecoration(
-              hintText: 'سبب الرفض (يظهر للطبيب)...',
-              hintStyle: GoogleFonts.cairo(color: const Color(0xFFB0BEC5)),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-            style: GoogleFonts.cairo(),
-          ),
-          actions: <Widget>[
-            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('إلغاء')),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: Colors.red),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('تأكيد الرفض'),
-            ),
-          ],
-        ),
-      ),
-    );
-    // Read text BEFORE dispose to avoid use-after-free.
-    final String adminNotes = notesCtrl.text.trim();
-    notesCtrl.dispose();
-    if (confirmed != true || !mounted) return;
-
-    try {
-      await _db.from(AppEndpoints.verificationRequests).update(<String, dynamic>{
-        'status':      'rejected',
-        'admin_notes': adminNotes,
-      }).eq('id', requestId);
-
-      final String? doctorId = _selected?['doctor_id'] as String?;
-      if (doctorId != null) {
-        final String notesSuffix = adminNotes.isNotEmpty ? '\nالسبب: $adminNotes' : '';
-        _db.functions.invoke(
-          'send-notification',
-          body: <String, dynamic>{
-            'user_id': doctorId,
-            'title':   'بشأن طلب التوثيق',
-            'body':    'نأسف، لم يتم قبول طلب التوثيق الخاص بك.$notesSuffix',
-            'data':    <String, String>{'type': 'verification_rejected'},
-          },
-        ).ignore();
-      }
-
-      _snack('تم رفض الطلب.');
-      _loadRequests();
-    } catch (e) {
-      _snack('خطأ: ${e.toString()}');
-    }
-  }
-
-  void _snack(String msg) {
+  void _showSnack(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg, textDirection: TextDirection.rtl), behavior: SnackBarBehavior.floating),
+      SnackBar(
+        content: Text(text, textDirection: TextDirection.rtl),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final List<dynamic> res = await _db
+          .from(AppEndpoints.verificationRequests)
+          .select()
+          .eq('status', 'pending')
+          .order('created_at', ascending: false);
+      if (!mounted) return;
+      setState(() {
+        _rows = res.cast<Map<String, dynamic>>();
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      _showSnack('تعذر تحميل طلبات التوثيق: $e');
+    }
+  }
+
+  Future<void> _openReviewSheet(Map<String, dynamic> row) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _VerificationDecisionSheet(
+        requestRow: row,
+        repository: _repo,
+        onApproved: (String requestId, int doctorId) async {
+          try {
+            await _db.rpc(
+              AppEndpoints.adminApproveVerification,
+              params: <String, dynamic>{
+                'p_request_id': requestId,
+                'p_doctor_id': doctorId,
+              },
+            );
+            if (!mounted) return;
+            setState(() => _rows.removeWhere((Map<String, dynamic> r) => r['id'] == requestId));
+            _showSnack('تمت الموافقة على طلب التوثيق.');
+          } catch (e) {
+            _showSnack('تعذرت الموافقة: $e');
+          }
+        },
+        onRejected: (String requestId, String notes) async {
+          try {
+            await _db.rpc(
+              AppEndpoints.adminRejectVerification,
+              params: <String, dynamic>{
+                'p_request_id': requestId,
+                'p_admin_notes': notes,
+              },
+            );
+            if (!mounted) return;
+            setState(() => _rows.removeWhere((Map<String, dynamic> r) => r['id'] == requestId));
+            _showSnack('تم رفض طلب التوثيق.');
+          } catch (e) {
+            _showSnack('تعذر رفض الطلب: $e');
+          }
+        },
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool wide = MediaQuery.of(context).size.width >= 700;
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            _buildHeader(),
-            const SizedBox(height: 16),
-            _buildFilterTabs(),
-            const SizedBox(height: 12),
-            Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : wide && _selected != null
-                      ? Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: _rows.isEmpty
+          ? ListView(
+              children: <Widget>[
+                const SizedBox(height: 140),
+                const Icon(Icons.verified_user, size: 64, color: Color(0xFFCBD5E1)),
+                const SizedBox(height: 10),
+                Center(
+                  child: Text(
+                    'لا توجد طلبات توثيق معلقة',
+                    style: GoogleFonts.cairo(fontSize: 15, color: const Color(0xFF94A3B8)),
+                  ),
+                ),
+              ],
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: _rows.length,
+              itemBuilder: (_, int i) {
+                final Map<String, dynamic> row = _rows[i];
+                final String id = (row['id'] ?? '').toString();
+                final int? doctorId = row['doctor_id'] is int
+                    ? row['doctor_id'] as int
+                    : int.tryParse((row['doctor_id'] ?? '').toString());
+                final String createdAt = (row['created_at'] ?? '').toString();
+                return Card(
+                  elevation: 0,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Color(0xFFE2E8F0)),
+                  ),
+                  child: Column(
+                    children: <Widget>[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFE3F2FD),
+                          borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+                        ),
+                        child: Row(
                           children: <Widget>[
-                            Expanded(child: _buildList()),
-                            const SizedBox(width: 16),
-                            SizedBox(width: 340, child: _buildReviewPanel()),
+                            const Icon(Icons.verified_user_outlined, color: Color(0xFF1976D2)),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                createdAt,
+                                style: GoogleFonts.cairo(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFE0B2),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                'قيد المراجعة',
+                                style: GoogleFonts.cairo(
+                                  fontSize: 11,
+                                  color: const Color(0xFFFF9800),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
                           ],
-                        )
-                      : _selected != null
-                          ? _buildReviewPanel()
-                          : _buildList(),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: Chip(
+                                label: Text('doctor_id: ${doctorId ?? '—'}'),
+                                backgroundColor: const Color(0xFFF1F5F9),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            FilledButton(
+                              onPressed: () => _openReviewSheet(row),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF1976D2),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              ),
+                              child: const Text('عرض المستندات والبت بالطلب'),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (id.isEmpty) const SizedBox.shrink(),
+                    ],
+                  ),
+                );
+              },
             ),
-          ],
-        ),
+    );
+  }
+}
+
+class _VerificationDecisionSheet extends StatefulWidget {
+  const _VerificationDecisionSheet({
+    required this.requestRow,
+    required this.repository,
+    required this.onApproved,
+    required this.onRejected,
+  });
+
+  final Map<String, dynamic> requestRow;
+  final VerificationRepository repository;
+  final Future<void> Function(String requestId, int doctorId) onApproved;
+  final Future<void> Function(String requestId, String notes) onRejected;
+
+  @override
+  State<_VerificationDecisionSheet> createState() => _VerificationDecisionSheetState();
+}
+
+class _VerificationDecisionSheetState extends State<_VerificationDecisionSheet> {
+  bool _loadingUrls = true;
+  bool _processing = false;
+  final Map<String, String> _urls = <String, String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUrls();
+  }
+
+  Future<void> _loadUrls() async {
+    setState(() => _loadingUrls = true);
+    try {
+      for (final String field in <String>[
+        'id_card_front_url',
+        'id_card_back_url',
+        'medical_license_url',
+      ]) {
+        final String path = (widget.requestRow[field] ?? '').toString();
+        if (path.isEmpty) continue;
+        final String url = await widget.repository.getSignedUrl(path);
+        if (!mounted) return;
+        _urls[field] = url;
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _loadingUrls = false);
+    }
+  }
+
+  Future<void> _approve() async {
+    if (_processing) return;
+    final String requestId = (widget.requestRow['id'] ?? '').toString();
+    final int? doctorId = widget.requestRow['doctor_id'] is int
+        ? widget.requestRow['doctor_id'] as int
+        : int.tryParse((widget.requestRow['doctor_id'] ?? '').toString());
+    if (requestId.isEmpty || doctorId == null) return;
+    setState(() => _processing = true);
+    await widget.onApproved(requestId, doctorId);
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _reject() async {
+    if (_processing) return;
+    final String requestId = (widget.requestRow['id'] ?? '').toString();
+    if (requestId.isEmpty) return;
+    final TextEditingController ctrl = TextEditingController();
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+        title: const Text('سبب الرفض'),
+        content: TextField(controller: ctrl, maxLines: 3),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('تأكيد الرفض')),
+        ],
       ),
     );
+    if (ok != true) return;
+    setState(() => _processing = true);
+    await widget.onRejected(requestId, ctrl.text.trim());
+    if (!mounted) return;
+    Navigator.of(context).pop();
   }
 
-  Widget _buildHeader() {
-    return Row(
-      children: <Widget>[
-        if (_selected != null)
-          IconButton(
-            onPressed: () => setState(() => _selected = null),
-            icon: const Icon(Icons.arrow_back_ios_new, size: 18),
-          ),
-        Expanded(
-          child: Text('مراجعة طلبات التوثيق',
-              style: GoogleFonts.cairo(
-                  fontSize: 20, fontWeight: FontWeight.w800, color: const Color(0xFF1D3557))),
-        ),
-        IconButton(
-          onPressed: _loadRequests,
-          icon: const Icon(Icons.refresh, color: Color(0xFF42A5F5)),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildFilterTabs() {
-    return Row(
-      children: VerificationStatus.values.map((VerificationStatus s) {
-        final bool selected = _filterStatus == s;
-        final (String label, Color color) = switch (s) {
-          VerificationStatus.pending  => ('معلّق', const Color(0xFFF9A825)),
-          VerificationStatus.approved => ('مقبول', const Color(0xFF388E3C)),
-          VerificationStatus.rejected => ('مرفوض', const Color(0xFFC62828)),
-        };
-        return Padding(
-          padding: const EdgeInsets.only(left: 8),
-          child: FilterChip(
-            label: Text(label, style: GoogleFonts.cairo(fontSize: 12, fontWeight: FontWeight.w600, color: selected ? Colors.white : color)),
-            selected: selected,
-            selectedColor: color,
-            backgroundColor: Colors.white,
-            checkmarkColor: Colors.white,
-            onSelected: (_) {
-              setState(() => _filterStatus = s);
-              _loadRequests();
-            },
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildList() {
-    if (_requests.isEmpty) {
-      return Center(
-        child: Text('لا توجد طلبات في هذه الفئة.',
-            style: GoogleFonts.cairo(color: const Color(0xFF90A4AE))),
-      );
-    }
-    return ListView.builder(
-      itemCount: _requests.length,
-      itemBuilder: (_, int i) {
-        final Map<String, dynamic> req = _requests[i];
-        final Map<String, dynamic> doctor =
-            (req['doctors'] as Map<String, dynamic>?) ?? <String, dynamic>{};
-        final String doctorName = (doctor['name'] ?? '—').toString();
-        final String spec       = (doctor['spec']  ?? '—').toString();
-        final String date       = _formatDate(req['created_at'] as String?);
-        final bool isSelected   = _selected?['id'] == req['id'];
-
-        return Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          elevation: 0,
-          color: isSelected ? const Color(0xFFE3F2FD) : Colors.white,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-            side: BorderSide(
-                color: isSelected ? const Color(0xFF42A5F5) : const Color(0xFFE3E8F0)),
-          ),
-          child: ListTile(
-            onTap: () => _selectRequest(req),
-            leading: const CircleAvatar(
-              backgroundColor: Color(0xFFE3F2FD),
-              child: Icon(Icons.person_outline, color: Color(0xFF42A5F5)),
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.85,
+      minChildSize: 0.45,
+      maxChildSize: 0.95,
+      builder: (_, ScrollController controller) {
+        return Column(
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                'مستندات التوثيق',
+                style: GoogleFonts.cairo(fontSize: 18, fontWeight: FontWeight.w700),
+              ),
             ),
-            title: Text(doctorName,
-                style: GoogleFonts.cairo(fontWeight: FontWeight.w600, fontSize: 14)),
-            subtitle: Text('$spec  •  $date',
-                style: GoogleFonts.cairo(fontSize: 11, color: const Color(0xFF90A4AE))),
-            trailing: const Icon(Icons.chevron_left, color: Color(0xFF90A4AE)),
-          ),
+            Expanded(
+              child: _loadingUrls
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView(
+                      controller: controller,
+                      padding: const EdgeInsets.all(12),
+                      children: <Widget>[
+                        _doc('وجه الهوية', _urls['id_card_front_url']),
+                        const SizedBox(height: 10),
+                        _doc('ظهر الهوية', _urls['id_card_back_url']),
+                        const SizedBox(height: 10),
+                        _doc('إجازة المزاولة', _urls['medical_license_url']),
+                        const SizedBox(height: 80),
+                      ],
+                    ),
+            ),
+            Container(
+              height: 70,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: const BoxDecoration(
+                border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+              ),
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _processing ? null : _approve,
+                      style: FilledButton.styleFrom(backgroundColor: const Color(0xFF2E7D32)),
+                      child: const Text('✓ موافقة'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: _processing ? null : _reject,
+                      style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                      child: const Text('✗ رفض'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         );
       },
     );
   }
 
-  Widget _buildReviewPanel() {
-    if (_selected == null) return const SizedBox.shrink();
-    final Map<String, dynamic> req    = _selected!;
-    final Map<String, dynamic> doctor =
-        (req['doctors'] as Map<String, dynamic>?) ?? <String, dynamic>{};
-    final String id        = (req['id'] as String?) ?? '';
-    final String doctorId  = (req['doctor_id'] as String?) ?? '';
-    final String doctorName = (doctor['name'] ?? '—').toString();
-    final String spec       = (doctor['spec']  ?? '—').toString();
-    final String gove       = (doctor['gove']  ?? '—').toString();
-    final String ph         = (doctor['ph']    ?? '—').toString();
-    final String date       = _formatDate(req['created_at'] as String?);
-    final bool isPending    = (req['status'] as String?) == 'pending';
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFE3E8F0)),
-      ),
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: <Widget>[
-          Text('معلومات الطبيب',
-              style: GoogleFonts.cairo(
-                  fontSize: 14, fontWeight: FontWeight.w800, color: const Color(0xFF1D3557))),
-          const SizedBox(height: 10),
-          _infoRow('الاسم', doctorName),
-          _infoRow('التخصص', spec),
-          _infoRow('المحافظة', gove),
-          _infoRow('الهاتف', ph),
-          _infoRow('التاريخ', date),
-          const Divider(height: 24),
-          Text('المستندات المرفوعة',
-              style: GoogleFonts.cairo(
-                  fontSize: 14, fontWeight: FontWeight.w800, color: const Color(0xFF1D3557))),
-          const SizedBox(height: 10),
-          if (_loadingUrls)
-            const Center(child: CircularProgressIndicator())
-          else ...<Widget>[
-            _buildDocImage('صورة الهوية (أمامي)', _signedUrls['id_card_front_url']),
-            const SizedBox(height: 10),
-            _buildDocImage('صورة الهوية (خلفي)', _signedUrls['id_card_back_url']),
-            const SizedBox(height: 10),
-            _buildDocImage('إجازة مزاولة المهنة', _signedUrls['medical_license_url']),
-          ],
-          if (isPending) ...<Widget>[
-            const SizedBox(height: 20),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => _reject(id),
-                    icon: const Icon(Icons.close, color: Colors.red),
-                    label: Text('رفض', style: GoogleFonts.cairo(color: Colors.red, fontWeight: FontWeight.w600)),
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.red),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () => _approve(id, doctorId),
-                    icon: const Icon(Icons.check),
-                    label: Text('موافقة', style: GoogleFonts.cairo(fontWeight: FontWeight.w600)),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF388E3C),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDocImage(String label, String? url) {
+  Widget _doc(String title, String? url) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text(label, style: GoogleFonts.cairo(fontSize: 12, color: const Color(0xFF607D8B))),
-        const SizedBox(height: 4),
-        if (url == null || url.isEmpty)
-          Container(
-            height: 80,
-            decoration: BoxDecoration(
-              color: const Color(0xFFF7FBFF),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFFCFD8DC)),
-            ),
-            child: const Center(child: Icon(Icons.image_not_supported_outlined, color: Color(0xFF90A4AE))),
-          )
-        else
-          GestureDetector(
-            onTap: () => _showFullImage(url, label),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.network(
-                url,
-                height: 140,
-                fit: BoxFit.cover,
-                loadingBuilder: (_, Widget child, ImageChunkEvent? progress) =>
-                    progress == null
-                        ? child
-                        : Container(
-                            height: 140,
-                            color: const Color(0xFFF7FBFF),
-                            child: const Center(child: CircularProgressIndicator()),
-                          ),
-              ),
-            ),
-          ),
+        Text(title, style: GoogleFonts.cairo(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: url == null || url.isEmpty
+              ? Container(
+                  height: 180,
+                  color: const Color(0xFFF8FAFC),
+                  alignment: Alignment.center,
+                  child: const Icon(Icons.image_not_supported_outlined, color: Color(0xFF94A3B8)),
+                )
+              : Image.network(
+                  url,
+                  height: 220,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  loadingBuilder: (_, Widget child, ImageChunkEvent? progress) =>
+                      progress == null
+                          ? child
+                          : Container(
+                              height: 220,
+                              color: const Color(0xFFF8FAFC),
+                              alignment: Alignment.center,
+                              child: const CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                  errorBuilder: (_, _, _) => Container(
+                    height: 220,
+                    color: const Color(0xFFF8FAFC),
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.broken_image_outlined,
+                      color: Color(0xFF94A3B8),
+                    ),
+                  ),
+                ),
+        ),
       ],
     );
-  }
-
-  void _showFullImage(String url, String title) {
-    showDialog<void>(
-      context: context,
-      builder: (BuildContext ctx) => Dialog(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: <Widget>[
-                  Expanded(child: Text(title, style: GoogleFonts.cairo(fontWeight: FontWeight.w700))),
-                  IconButton(onPressed: () => Navigator.of(ctx).pop(), icon: const Icon(Icons.close)),
-                ],
-              ),
-            ),
-            InteractiveViewer(
-              child: Image.network(url, fit: BoxFit.contain),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _infoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        children: <Widget>[
-          SizedBox(
-            width: 80,
-            child: Text(label, style: GoogleFonts.cairo(fontSize: 12, color: const Color(0xFF90A4AE))),
-          ),
-          Expanded(
-            child: Text(value, style: GoogleFonts.cairo(fontSize: 13, color: const Color(0xFF1D3557), fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _formatDate(String? iso) {
-    if (iso == null) return '';
-    final DateTime dt = DateTime.tryParse(iso) ?? DateTime.now();
-    return '${dt.day}/${dt.month}/${dt.year}';
   }
 }
