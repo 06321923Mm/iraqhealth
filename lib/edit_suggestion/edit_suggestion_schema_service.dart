@@ -1,6 +1,8 @@
+// ✅ UPDATED 2026-05-09
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'schema_models.dart';
+import '../core/services/schema_fallback.dart';
 
 /// Loads [EditSuggestionSchemaBundle] from Supabase RPC (no table/column names in client).
 class EditSuggestionSchemaService {
@@ -30,16 +32,27 @@ class EditSuggestionSchemaService {
       _cache = b;
       return b;
     } catch (_) {
-      const EditSuggestionSchemaBundle fail = EditSuggestionSchemaBundle(
-        ok: false,
-        error: 'rpc_failed',
-        reportsSchema: 'public',
-        reportsTable: 'reports',
-        reportColumns: <SchemaColumn>[],
-        targets: <EditSuggestionTarget>[],
-      );
-      _cache = fail;
-      return fail;
+      // RPC failed — try a lightweight connectivity check to see if Supabase
+      // is reachable at all.  If the `reports` table responds we return a
+      // hardcoded fallback bundle so the UI still works.  Only return ok:false
+      // when even that fails (genuine network outage or auth issue).
+      try {
+        await _client.from('reports').select('id').limit(1);
+        final EditSuggestionSchemaBundle fallback = buildFallbackBundle();
+        _cache = fallback;
+        return fallback;
+      } catch (_) {
+        const EditSuggestionSchemaBundle fail = EditSuggestionSchemaBundle(
+          ok: false,
+          error: 'rpc_failed',
+          reportsSchema: 'public',
+          reportsTable: 'reports',
+          reportColumns: <SchemaColumn>[],
+          targets: <EditSuggestionTarget>[],
+        );
+        _cache = fail;
+        return fail;
+      }
     } finally {
       _inFlight = null;
     }

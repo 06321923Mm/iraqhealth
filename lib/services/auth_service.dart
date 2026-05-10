@@ -1,5 +1,7 @@
+// ✅ UPDATED 2026-05-09
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import 'crashlytics_service.dart';
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -98,6 +100,7 @@ class AuthService {
       } on PlatformException catch (e) {
         // sign_in_canceled → المستخدم أغلق النافذة
         if (e.code == 'sign_in_canceled') return;
+        CrashlyticsService.instance.logAuthFailure('google', e);
         throw AuthException('فشل تسجيل الدخول بجوجل (${e.code}): ${e.message}');
       }
 
@@ -122,13 +125,28 @@ class AuthService {
       return;
     }
 
-    final bool opened = await _client.auth.signInWithOAuth(
-      OAuthProvider.google,
-      redirectTo: AppEnv.oauthRedirectUrl,
-      authScreenLaunchMode: LaunchMode.externalApplication,
-    );
-    if (!opened) {
-      throw const AuthException('تعذّر فتح نافذة تسجيل الدخول.');
+    try {
+      // Android / Windows / Linux — browser PKCE flow
+      // LaunchMode.platformDefault is more reliable than externalApplication
+      // on Android 14+ (API 34) because the OS selects the best Custom Tab
+      // integration automatically without forcing an external browser.
+      final bool opened = await _client.auth.signInWithOAuth(
+        OAuthProvider.google,
+        redirectTo: AppEnv.oauthRedirectUrl,
+        authScreenLaunchMode: LaunchMode.platformDefault,
+      );
+      if (!opened) {
+        throw const AuthException('تعذّر فتح نافذة تسجيل الدخول.');
+      }
+    } on PlatformException catch (e) {
+      // sign_in_canceled (iOS/macOS) and 12501 (Google Play Services on Android)
+      // both mean the user dismissed the sign-in UI — treat as silent no-op.
+      if (e.code == 'sign_in_canceled' || e.code == '12501') return;
+      CrashlyticsService.instance.logAuthFailure('google', e);
+      throw AuthException(
+        'تعذّر تسجيل الدخول بحساب Google (${e.code}). '
+        'تأكد من الاتصال بالإنترنت.',
+      );
     }
   }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -30,6 +32,10 @@ class _QuickStatusWidgetState extends State<QuickStatusWidget> {
   bool _saving = false;
   DateTime? _lastUpdated;
 
+  /// Realtime subscription scoped to this doctor only — avoids unnecessary
+  /// data/battery use that an unfiltered .stream() would cause.
+  StreamSubscription<List<Map<String, dynamic>>>? _statusSubscription;
+
   static const List<({int? hours, String label, bool endOfDay})>
       _expiryOptions = <({int? hours, String label, bool endOfDay})>[
     (hours: null,  label: 'بدون انتهاء',  endOfDay: false),
@@ -45,10 +51,46 @@ class _QuickStatusWidgetState extends State<QuickStatusWidget> {
     _status       = widget.initialStatus;
     _msgCtrl.text = widget.initialMessage ?? '';
     _lastUpdated  = widget.initialExpiresAt;
+    _subscribeToStatus();
+  }
+
+  void _subscribeToStatus() {
+    _statusSubscription?.cancel();
+    _statusSubscription = Supabase.instance.client
+        .from(AppEndpoints.doctors)
+        .stream(primaryKey: <String>['id'])
+        .eq('id', widget.doctorId)
+        .listen(_onStatusChanged, onError: (_) {});
+  }
+
+  void _onStatusChanged(List<Map<String, dynamic>> rows) {
+    if (rows.isEmpty || _saving) return;
+    final Map<String, dynamic> row = rows.first;
+    final DoctorStatus status = DoctorStatusX.fromString(
+      row['current_status']?.toString(),
+    );
+    final String? message = row['status_message']?.toString();
+    final dynamic rawUpdated = row['last_status_update'] ?? row['updated_at'];
+    DateTime? lastUpdated;
+    if (rawUpdated != null) {
+      lastUpdated = DateTime.tryParse(rawUpdated.toString())?.toLocal();
+    }
+    if (!mounted) return;
+    setState(() {
+      _status = status;
+      if (message != null && _msgCtrl.text != message) {
+        _msgCtrl.text = message;
+      }
+      if (lastUpdated != null) {
+        _lastUpdated = lastUpdated;
+      }
+    });
   }
 
   @override
   void dispose() {
+    _statusSubscription?.cancel();
+    _statusSubscription = null;
     _msgCtrl.dispose();
     super.dispose();
   }

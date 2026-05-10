@@ -1,10 +1,12 @@
+// ✅ UPDATED 2026-05-09
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../app_navigation.dart';
-import '../supabase_write_errors.dart';
+import '../core/config/app_endpoints.dart';
 import '../edit_suggestion/arabic_column_label.dart';
 import '../edit_suggestion/column_edit_semantics.dart';
 import '../edit_suggestion/dynamic_report_insert.dart';
@@ -12,6 +14,7 @@ import '../edit_suggestion/edit_suggestion_schema_service.dart';
 import '../edit_suggestion/google_maps_coords_parser.dart';
 import '../edit_suggestion/schema_models.dart';
 import '../location_picker_screen.dart';
+import '../widgets/medical_category_selector.dart';
 
 /// RTL form: Arabic labels only in the field selector; values follow column types.
 class DynamicEditSuggestionForm extends StatefulWidget {
@@ -48,7 +51,6 @@ class DynamicEditSuggestionForm extends StatefulWidget {
 
 class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
   final SupabaseClient _supabase = Supabase.instance.client;
-  final TextEditingController _whereWrongController = TextEditingController();
   final TextEditingController _valueController = TextEditingController();
   final TextEditingController _mapsLinkController = TextEditingController();
 
@@ -77,7 +79,6 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
   @override
   void dispose() {
     _fkDebounce?.cancel();
-    _whereWrongController.dispose();
     _valueController.dispose();
     _mapsLinkController.dispose();
     super.dispose();
@@ -88,12 +89,25 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
     if (s == null) {
       return false;
     }
-    return isCoordinateLikeColumn(s) || isMapsLinkOrLocationTextColumn(s);
+    final String n = s.columnName.toLowerCase();
+    return isCoordinateLikeColumn(s) ||
+        isMapsLinkOrLocationTextColumn(s) ||
+        n == 'longitude' ||
+        n == 'lng' ||
+        n == 'lon';
   }
 
   bool get _uuidMode {
     final SchemaColumn? s = _selected;
     return s != null && s.isUuidType;
+  }
+
+  bool get _structuredSpecMode {
+    final SchemaColumn? s = _selected;
+    return s != null &&
+        s.columnName == 'spec' &&
+        !_coordMode &&
+        !_uuidMode;
   }
 
   Future<void> _refreshFkOptions(String q) async {
@@ -194,7 +208,7 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
       if (_pickedLat == null || _pickedLng == null) {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           const SnackBar(
-            content: Text('حدد الموقع على الخريطة أو الصق رابط خرائط Google صالح.'),
+            content: Text('حدد الموقع على الخريطة أو الصق رابط خرائط صالحاً.'),
           ),
         );
         return;
@@ -203,11 +217,51 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
 
     setState(() => _submitting = true);
 
+    // Anti-spam: check the daily report quota BEFORE issuing the insert so the
+    // user gets a friendly Arabic message instead of a Postgres trigger error.
+    try {
+      final dynamic quotaRes = await _supabase.rpc(
+        AppEndpoints.dailyReportQuota,
+        params: <String, dynamic>{'p_max': 5},
+      );
+      final List<dynamic> rows = quotaRes is List ? quotaRes : <dynamic>[];
+      if (rows.isNotEmpty) {
+        final Map<String, dynamic> q = rows.first as Map<String, dynamic>;
+        final bool canSubmit = q['can_submit'] == true;
+        final int used = q['used'] is int
+            ? q['used'] as int
+            : int.tryParse('${q['used']}') ?? 0;
+        final int max = q['max_per_day'] is int
+            ? q['max_per_day'] as int
+            : int.tryParse('${q['max_per_day']}') ?? 5;
+        if (!canSubmit) {
+          if (mounted) {
+            setState(() => _submitting = false);
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text(
+                  'تجاوزت الحد اليومي ($used/$max تقارير). حاول مجدداً غداً.',
+                ),
+                behavior: SnackBarBehavior.floating,
+                margin: const EdgeInsets.all(12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            );
+          }
+          return;
+        }
+      }
+    } catch (_) {
+      // Quota RPC unavailable (older backend) — skip the optimistic check;
+      // the DB trigger will still enforce the cap server-side.
+    }
+
     final Map<String, dynamic> row = DynamicReportInsertBuilder(widget.bundle).build(
       targetPkValue: widget.targetPkValue,
       doctorNameSnapshot: widget.doctorNameSnapshot,
       selectedField: sel,
-      whereWrongText: _whereWrongController.text,
       suggestedText: _valueController.text,
       statusPendingValue: widget.statusPendingValue,
       suggestedLatitude: _coordMode ? _pickedLat : null,
@@ -216,6 +270,17 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
 
     try {
       await _supabase.from(widget.bundle.reportsTable).insert(row);
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: const Text('تم إرسال اقتراحك، سيتم مراجعته من قِبل الإدارة.'),
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(12),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
       widget.onSubmitted();
     } catch (error) {
       if (!mounted) {
@@ -224,7 +289,10 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
       setState(() => _submitting = false);
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         SnackBar(
-          content: Text('تعذر الإرسال: ${reportInsertErrorMessage(error)}'),
+          content: Text('تعذر الإرسال: ${error.toString()}'),
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(12),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       );
     }
@@ -324,7 +392,7 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
               TextFormField(
                 controller: _mapsLinkController,
                 decoration: const InputDecoration(
-                  labelText: 'أو الصق رابط خرائط Google',
+                  labelText: 'أو الصق رابط الخرائط',
                   filled: true,
                   fillColor: Color(0xFFF2F7FC),
                   border: OutlineInputBorder(
@@ -347,7 +415,7 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
                 controller: _valueController,
                 onChanged: _onValueChangedForFk,
                 decoration: const InputDecoration(
-                  labelText: 'معرّف القيمة (UUID)',
+                  labelText: 'معرّف القيمة المرجعي',
                   filled: true,
                   fillColor: Color(0xFFF2F7FC),
                   border: OutlineInputBorder(
@@ -357,7 +425,7 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
                 validator: (String? v) {
                   final String t = v?.trim() ?? '';
                   if (t.length < 32) {
-                    return 'أدخل UUID كاملاً أو اختر من القائمة';
+                    return 'أدخل المعرّف كاملاً أو اختر من القائمة';
                   }
                   return null;
                 },
@@ -386,55 +454,62 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
             ],
             if (!_uuidMode) ...<Widget>[
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _valueController,
-                maxLines: _coordMode ? 3 : 4,
-                keyboardType: _selected != null && _selected!.isNumericType && !_coordMode
-                    ? TextInputType.number
-                    : TextInputType.multiline,
-                decoration: InputDecoration(
-                  labelText: _coordMode
-                      ? 'وصف / ملاحظات على الموقع (اختياري)'
-                      : 'ما التصحيح المقترح؟',
-                  alignLabelWithHint: true,
-                  filled: true,
-                  fillColor: const Color(0xFFF2F7FC),
-                  border: const OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(14)),
+              if (_structuredSpecMode)
+                MedicalCategorySelector(
+                  key: ValueKey<SchemaColumn?>(_selected),
+                  initialStoredSpec: '',
+                  showIntroLabels: false,
+                  tileRadius: 12,
+                  decorateDropdownField: (String labelText) => InputDecoration(
+                    labelText: labelText,
+                    filled: true,
+                    fillColor: const Color(0xFFF2F7FC),
+                    border: const OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(14)),
+                    ),
                   ),
-                ),
-                validator: (String? value) {
-                  if (_coordMode) {
+                  onComposedStoredSpecChanged: (String s) {
+                    _valueController.text = s;
+                  },
+                )
+              else
+                TextFormField(
+                  controller: _valueController,
+                  maxLines: _coordMode ? 3 : 4,
+                  maxLength: _coordMode ? null : 500,
+                  inputFormatters: (_selected?.columnName == 'ph' ||
+                          _selected?.columnName == 'ph2')
+                      ? <TextInputFormatter>[
+                          FilteringTextInputFormatter.allow(RegExp(r'[0-9 +\-]')),
+                        ]
+                      : null,
+                  keyboardType: _selected != null &&
+                          _selected!.isNumericType &&
+                          !_coordMode
+                      ? TextInputType.number
+                      : TextInputType.multiline,
+                  decoration: InputDecoration(
+                    labelText: _coordMode
+                        ? 'وصف / ملاحظات على الموقع (اختياري)'
+                        : 'ما التصحيح المقترح؟',
+                    alignLabelWithHint: true,
+                    filled: true,
+                    fillColor: const Color(0xFFF2F7FC),
+                    border: const OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(14)),
+                    ),
+                  ),
+                  validator: (String? value) {
+                    if (_coordMode) {
+                      return null;
+                    }
+                    if (value == null || value.trim().length < 2) {
+                      return 'اذكر التصحيح المقترح';
+                    }
                     return null;
-                  }
-                  if (value == null || value.trim().length < 2) {
-                    return 'اذكر التصحيح المقترح';
-                  }
-                  return null;
-                },
-              ),
-            ],
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _whereWrongController,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText:
-                    'وين يظهر الخطأ بالضبط؟ (مثلاً: مربع الهاتف، سطر التخصص)',
-                alignLabelWithHint: true,
-                filled: true,
-                fillColor: Color(0xFFF2F7FC),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(14)),
+                  },
                 ),
-              ),
-              validator: (String? value) {
-                if (value == null || value.trim().length < 3) {
-                  return 'حدد مكان الخطأ في البطاقة (3 أحرف على الأقل)';
-                }
-                return null;
-              },
-            ),
+            ],
             const SizedBox(height: 18),
             FilledButton(
               onPressed: _submitting ? null : _submit,

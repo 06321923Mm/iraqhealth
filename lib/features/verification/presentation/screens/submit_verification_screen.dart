@@ -1,3 +1,4 @@
+// ✅ UPDATED 2026-05-09
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -40,12 +41,22 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
   // Existing request (if any)
   VerificationRequestModel? _existingRequest;
   bool _loadingStatus = true;
+  int? _doctorId;
 
   @override
   void initState() {
     super.initState();
     _repo = VerificationRepository(Supabase.instance.client);
+    _loadDoctorId();
     _loadExistingRequest();
+  }
+
+  Future<void> _loadDoctorId() async {
+    try {
+      final int? id = await _repo.fetchDoctorIdForCurrentUser();
+      if (!mounted) return;
+      setState(() => _doctorId = id);
+    } catch (_) {}
   }
 
   Future<void> _loadExistingRequest() async {
@@ -55,10 +66,20 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
       return;
     }
     try {
+      final int? doctorId = await _repo.fetchDoctorIdForCurrentUser();
+      if (!mounted) return;
+      _doctorId = doctorId;
+      if (doctorId == null) {
+        setState(() {
+          _existingRequest = null;
+          _loadingStatus = false;
+        });
+        return;
+      }
       final List<dynamic> rows = await Supabase.instance.client
           .from(AppEndpoints.verificationRequests)
           .select()
-          .eq('doctor_id', uid)
+          .eq('doctor_id', doctorId)
           .order('created_at', ascending: false)
           .limit(1);
       if (!mounted) return;
@@ -115,6 +136,10 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
   Future<void> _submit() async {
     final String? uid = Supabase.instance.client.auth.currentUser?.id;
     if (uid == null) return;
+    if (_doctorId == null) {
+      _snack('لم يتم ربط حسابك بعيادة بعد، يرجى ربط حسابك أولاً.');
+      return;
+    }
 
     if (_frontBytes == null || _backBytes == null || _licenseBytes == null) {
       _snack('يرجى رفع جميع المستندات الثلاثة قبل الإرسال.');
@@ -158,7 +183,7 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
 
       // Submit request
       await _repo.submitVerificationRequest(
-        doctorId:            uid,
+        doctorId:            _doctorId!,
         idCardFrontPath:     frontPath,
         idCardBackPath:      backPath,
         medicalLicensePath:  licensePath,
@@ -184,6 +209,8 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
       SnackBar(
         content: Text(msg, textDirection: TextDirection.rtl),
         behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
@@ -293,6 +320,8 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
   }
 
   Widget _buildForm() {
+    final bool canSubmit =
+        _frontBytes != null && _backBytes != null && _licenseBytes != null;
     return ListView(
       padding: const EdgeInsets.all(16),
       children: <Widget>[
@@ -327,11 +356,26 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
           uploading: _uploadingLicense,
         ),
         const SizedBox(height: 24),
-        LoadingButton(
-          label: 'إرسال الطلب',
-          icon: Icons.send_outlined,
-          loading: _submitting,
-          onPressed: _submit,
+        FilledButton(
+          onPressed: (_submitting || !canSubmit) ? null : _submit,
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF1976D2),
+            minimumSize: const Size(double.infinity, 54),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          child: _submitting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : Text(
+                  'إرسال طلب التوثيق',
+                  style: GoogleFonts.cairo(fontWeight: FontWeight.w700),
+                ),
         ),
         const SizedBox(height: 32),
       ],
@@ -376,74 +420,109 @@ class _SubmitVerificationScreenState extends State<SubmitVerificationScreen> {
     final bool picked = bytes != null;
     return GestureDetector(
       onTap: uploading || _submitting ? null : () => _pickImage(field),
-      child: Container(
+      child: Card(
+        elevation: 0,
+        color: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
         padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: picked ? const Color(0xFF66BB6A) : const Color(0xFFCFD8DC),
-          ),
-        ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: picked
-                    ? const Color(0xFFE8F5E9)
-                    : const Color(0xFFF7FBFF),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                picked ? Icons.check_circle_outline : icon,
-                color: picked
-                    ? const Color(0xFF388E3C)
-                    : const Color(0xFF90A4AE),
+            Text(
+              label,
+              style: GoogleFonts.cairo(
+                fontWeight: FontWeight.w700,
+                fontSize: 14,
+                color: const Color(0xFF1D3557),
               ),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            const SizedBox(height: 10),
+            if (!picked)
+              CustomPaint(
+                painter: _DashedBorderPainter(),
+                child: Container(
+                  height: 120,
+                  alignment: Alignment.center,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(icon, color: const Color(0xFF90A4AE)),
+                      const SizedBox(height: 8),
+                      Text(
+                        'اضغط لاختيار صورة',
+                        style: GoogleFonts.cairo(
+                          color: const Color(0xFF90A4AE),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              Stack(
                 children: <Widget>[
-                  Text(
-                    label,
-                    style: GoogleFonts.cairo(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                      color: const Color(0xFF1D3557),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.memory(
+                      bytes,
+                      height: 140,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
                     ),
                   ),
-                  Text(
-                    picked ? 'تم الاختيار — اضغط لتغيير' : 'اضغط لاختيار الصورة',
-                    style: GoogleFonts.cairo(
-                      fontSize: 12,
-                      color: picked
-                          ? const Color(0xFF388E3C)
-                          : const Color(0xFF90A4AE),
+                  const Positioned(
+                    top: 8,
+                    right: 8,
+                    child: CircleAvatar(
+                      radius: 12,
+                      backgroundColor: Color(0xFF2E7D32),
+                      child: Icon(Icons.check, color: Colors.white, size: 14),
                     ),
                   ),
                 ],
               ),
-            ),
-            if (uploading)
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            else
-              Icon(
-                picked ? Icons.edit_outlined : Icons.add_photo_alternate_outlined,
-                color: const Color(0xFF90A4AE),
-                size: 20,
+            if (uploading) ...<Widget>[
+              const SizedBox(height: 10),
+              const LinearProgressIndicator(
+                color: Color(0xFF42A5F5),
               ),
+            ],
           ],
         ),
+      ),
       ),
     );
   }
 }
 
 enum _DocField { front, back, license }
+
+class _DashedBorderPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = const Color(0xFFCBD5E1)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    const double dash = 6;
+    const double gap = 4;
+    final RRect r = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      const Radius.circular(12),
+    );
+    final Path path = Path()..addRRect(r);
+    for (final metric in path.computeMetrics()) {
+      double distance = 0;
+      while (distance < metric.length) {
+        final double next = distance + dash;
+        canvas.drawPath(metric.extractPath(distance, next), paint);
+        distance = next + gap;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}

@@ -18,7 +18,6 @@ class DynamicReportInsertBuilder {
     required Object targetPkValue,
     required String doctorNameSnapshot,
     required SchemaColumn selectedField,
-    required String whereWrongText,
     required String suggestedText,
     required String statusPendingValue,
     double? suggestedLatitude,
@@ -54,7 +53,7 @@ class DynamicReportInsertBuilder {
 
     putIfHas('doctor_name', doctorNameSnapshot);
     putIfHas('info_issue_type', issueType);
-    putIfHas('error_location', whereWrongText.trim());
+    putIfHas('error_location', 'غير محدد');
     putIfHas('suggested_correction', correctionText);
     putIfHas('status', statusPendingValue);
 

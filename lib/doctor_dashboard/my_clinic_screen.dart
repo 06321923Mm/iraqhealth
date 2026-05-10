@@ -1,3 +1,4 @@
+// ✅ UPDATED 2026-05-09
 import 'dart:async';
 import 'dart:typed_data';
 
@@ -6,14 +7,18 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:flutter_blurhash/flutter_blurhash.dart';
+
 import '../core/components/loading_button.dart';
 import '../core/components/status_badge.dart';
 import '../core/config/app_endpoints.dart';
+import '../core/services/image_processing_service.dart';
 import '../doctor_constants.dart';
 import '../features/my_clinic/presentation/widgets/quick_status_widget.dart';
 import '../features/verification/data/models/verification_request_model.dart';
 import '../features/verification/presentation/screens/submit_verification_screen.dart';
 import '../widgets/doctor_map_location_field.dart';
+import '../widgets/medical_category_selector.dart';
 
 enum _ViewMode {
   checking,
@@ -54,6 +59,9 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
   String? _searchError;
   Timer? _debounce;
 
+  final GlobalKey<MedicalCategorySelectorState> _medicalCategoryKey =
+      GlobalKey<MedicalCategorySelectorState>();
+
   // Edit form state
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _nameCtrl    = TextEditingController();
@@ -63,8 +71,9 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
   final TextEditingController _notesCtrl   = TextEditingController();
   final TextEditingController _areaCtrl    = TextEditingController();
   final TextEditingController _profileImageCtrl = TextEditingController();
+  String? _profileBlurhash;
   final ImagePicker _imagePicker = ImagePicker();
-  String? _selectedSpec;
+  String _loadedDoctorSpecForMedicalUi = '';
   String? _selectedGove;
   double? _latitude;
   double? _longitude;
@@ -106,7 +115,8 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
           .from(AppEndpoints.doctors)
           .select(
               'id, spec, name, addr, area, ph, ph2, notes, gove, latitude, longitude, '
-              'profile_image_url, owner_user_id, is_verified, current_status, '
+              'profile_image_url, image_blurhash, owner_user_id, is_verified, '
+              'verification_date, current_status, '
               'status_message, status_expires_at')
           .eq('owner_user_id', uid)
           .limit(1);
@@ -126,12 +136,18 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
         }
 
         // Clinic linked but not verified — check verification request
-        final List<dynamic> vReqs = await _db
-            .from(AppEndpoints.verificationRequests)
-            .select()
-            .eq('doctor_id', uid)
-            .order('created_at', ascending: false)
-            .limit(1);
+        List<dynamic> vReqs = <dynamic>[];
+        try {
+          final dynamic doctorPk = raw['id'];
+          vReqs = await _db
+              .from(AppEndpoints.verificationRequests)
+              .select()
+              .eq('doctor_id', doctorPk)
+              .order('created_at', ascending: false)
+              .limit(1);
+        } catch (_) {
+          // شبكة أو إعداد RLS؛ نُعامل كعدم وصول للنتيجة دون إسقاط المستخدم إلى «غير مرتبط»
+        }
         if (!mounted) return;
 
         if (vReqs.isEmpty) {
@@ -191,9 +207,11 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
     _notesCtrl.text  = (raw['notes'] ?? '').toString();
     _areaCtrl.text   = (raw['area']  ?? '').toString();
     _profileImageCtrl.text = _readImageUrl(raw);
-    final String spec = (raw['spec'] ?? '').toString();
+    final dynamic rawHash = raw['image_blurhash'];
+    final String hash = rawHash?.toString().trim() ?? '';
+    _profileBlurhash = hash.isEmpty ? null : hash;
     final String gove = (raw['gove'] ?? '').toString();
-    _selectedSpec = kPhysicianSpecializations.contains(spec) ? spec : null;
+    _loadedDoctorSpecForMedicalUi = (raw['spec'] ?? '').toString();
     _selectedGove = kGovernorates.contains(gove) ? gove : null;
     _latitude  = _parseDouble(raw['latitude'])  ?? _parseDouble(raw['lat']);
     _longitude = _parseDouble(raw['longitude']) ?? _parseDouble(raw['lng']);
@@ -336,6 +354,12 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       _showSnack('يرجى تحديد موقع العيادة على الخريطة.');
       return;
     }
+    final MedicalCategorySelectorState? med = _medicalCategoryKey.currentState;
+    if (med == null || !med.validateSelection()) {
+      _showSnack('يرجى اختيار المجال الطبي والتخصص');
+      return;
+    }
+    final String specOut = med.composeStoredSpec();
     final int? id  = _clinicRaw?['id'] as int?;
     final String? uid = _db.auth.currentUser?.id;
     if (id == null || uid == null) return;
@@ -344,7 +368,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
     try {
       await _db.from(AppEndpoints.doctors).update(<String, dynamic>{
         'name':              _nameCtrl.text.trim(),
-        'spec':              _selectedSpec ?? '',
+        'spec':              specOut,
         'gove':              _selectedGove ?? '',
         'area':              _areaCtrl.text.trim(),
         'addr':              _addrCtrl.text.trim(),
@@ -359,13 +383,14 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       if (!mounted) return;
       _clinicRaw = <String, dynamic>{
         ..._clinicRaw!,
-        'name': _nameCtrl.text.trim(), 'spec': _selectedSpec ?? '',
+        'name': _nameCtrl.text.trim(), 'spec': specOut,
         'gove': _selectedGove ?? '',   'area': _areaCtrl.text.trim(),
         'addr': _addrCtrl.text.trim(), 'ph':   _ph1Ctrl.text.trim(),
         'ph2':  _ph2Ctrl.text.trim(),  'notes': _notesCtrl.text.trim(),
         'latitude': _latitude,         'longitude': _longitude,
         'profile_image_url': _profileImageCtrl.text.trim(),
       };
+      _loadedDoctorSpecForMedicalUi = specOut;
       setState(() { _saving = false; _saveSuccess = true; });
     } catch (e) {
       if (!mounted) return;
@@ -382,7 +407,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
     }
     try {
       final XFile? picked = await _imagePicker.pickImage(
-        source: ImageSource.gallery, imageQuality: 85, maxWidth: 1400,
+        source: ImageSource.gallery, imageQuality: 95, maxWidth: 2000,
       );
       if (picked == null || !mounted) return;
 
@@ -390,30 +415,50 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       final Uint8List bytes = await picked.readAsBytes();
       if (!mounted) return;
 
-      final String rawExt = picked.name.contains('.')
-          ? picked.name.split('.').last.toLowerCase()
-          : 'jpg';
-      final String ext = RegExp(r'^[a-z0-9]+$').hasMatch(rawExt) ? rawExt : 'jpg';
-      final String contentType = switch (ext) {
-        'png'  => 'image/png',
-        'webp' => 'image/webp',
-        _      => 'image/jpeg',
-      };
+      // Compress to WebP + generate BlurHash for placeholder.
+      final ProcessedImageResult processed =
+          await ImageProcessingService.compressAndHash(
+        original: bytes,
+        quality: 75,
+      );
+      if (!mounted) return;
+
       final String path =
-          '$uid/$doctorId/profile_${DateTime.now().millisecondsSinceEpoch}.$ext';
+          '$uid/$doctorId/profile_${DateTime.now().millisecondsSinceEpoch}.${processed.fileExtension}';
       final String oldImageUrl = _profileImageCtrl.text.trim();
 
       await _db.storage.from(AppEndpoints.clinicProfileImages).uploadBinary(
-            path, bytes,
-            fileOptions: FileOptions(upsert: true, contentType: contentType),
+            path,
+            processed.bytes,
+            fileOptions:
+                FileOptions(upsert: true, contentType: processed.contentType),
           );
       final String imageUrl =
           _db.storage.from(AppEndpoints.clinicProfileImages).getPublicUrl(path);
+
+      // Persist BlurHash next to the new URL so cards can render an instant
+      // placeholder (instead of leaving the column stale from the previous image).
+      try {
+        await _db
+            .from(AppEndpoints.doctors)
+            .update(<String, dynamic>{
+              'profile_image_url': imageUrl,
+              'image_blurhash': processed.blurhash.isEmpty
+                  ? null
+                  : processed.blurhash,
+            })
+            .eq('id', doctorId);
+      } catch (_) {
+        // Falls through to old behaviour: card without blurhash.
+      }
+
       await _tryDeleteProfileImageByUrl(oldImageUrl);
 
       if (!mounted) return;
       setState(() {
         _profileImageCtrl.text = imageUrl;
+        _profileBlurhash =
+            processed.blurhash.isEmpty ? null : processed.blurhash;
         if (_saveSuccess) _saveSuccess = false;
         if (_saveError != null) _saveError = null;
       });
@@ -496,14 +541,28 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
     );
   }
 
-  AppBar _buildAppBar({List<Widget>? actions}) {
+  Future<void> _signOut() async {
+    await Supabase.instance.client.auth.signOut();
+    if (mounted) {
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (_) => false);
+    }
+  }
+
+  AppBar _buildAppBar({List<Widget>? extraActions}) {
     return AppBar(
       backgroundColor: const Color(0xFF42A5F5),
       foregroundColor: Colors.white,
       surfaceTintColor: Colors.transparent,
       centerTitle: true,
       title: Text('عيادتي', style: GoogleFonts.cairo(fontWeight: FontWeight.w700)),
-      actions: actions,
+      actions: <Widget>[
+        if (extraActions != null) ...extraActions,
+        IconButton(
+          icon: const Icon(Icons.logout_outlined),
+          tooltip: 'تسجيل الخروج',
+          onPressed: _signOut,
+        ),
+      ],
     );
   }
 
@@ -555,15 +614,15 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Color(0xFFE3E8F0))),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        border: const Border(bottom: BorderSide(color: Color(0xFFE3E8F0))),
       ),
       child: Column(
         children: <Widget>[
           Container(
             padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(color: Color(0xFFE3F2FD), shape: BoxShape.circle),
+            decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer, shape: BoxShape.circle),
             child: const Icon(Icons.store_outlined, size: 40, color: Color(0xFF42A5F5)),
           ),
           const SizedBox(height: 12),
@@ -637,7 +696,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       margin: const EdgeInsets.symmetric(vertical: 4),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       elevation: 0,
-      color: Colors.white,
+      color: Theme.of(context).colorScheme.surface,
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Row(
@@ -761,7 +820,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         backgroundColor: const Color(0xFFF7FBFF),
-        appBar: _buildAppBar(actions: <Widget>[_unlinkMenu()]),
+        appBar: _buildAppBar(extraActions: <Widget>[_unlinkMenu()]),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(28),
@@ -815,7 +874,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         backgroundColor: const Color(0xFFF7FBFF),
-        appBar: _buildAppBar(actions: <Widget>[_unlinkMenu()]),
+        appBar: _buildAppBar(extraActions: <Widget>[_unlinkMenu()]),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(28),
@@ -858,7 +917,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         backgroundColor: const Color(0xFFF7FBFF),
-        appBar: _buildAppBar(actions: <Widget>[_unlinkMenu()]),
+        appBar: _buildAppBar(extraActions: <Widget>[_unlinkMenu()]),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(28),
@@ -923,7 +982,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
       textDirection: TextDirection.rtl,
       child: Scaffold(
         backgroundColor: const Color(0xFFF7FBFF),
-        appBar: _buildAppBar(actions: <Widget>[_unlinkMenu()]),
+        appBar: _buildAppBar(extraActions: <Widget>[_unlinkMenu()]),
         body: Form(
           key: _formKey,
           child: ListView(
@@ -933,7 +992,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
               const SizedBox(height: 16),
               // Quick Status Widget
               QuickStatusWidget(
-                doctorId:       _clinicRaw!['id'] as int,
+                doctorId:       (_clinicRaw?['id'] as int?) ?? 0,
                 initialStatus:  currentStatus,
                 initialMessage: statusMessage,
                 initialExpiresAt: expiresAt,
@@ -943,9 +1002,38 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
                 _buildTextInput(controller: _nameCtrl, label: 'اسم العيادة / الطبيب', icon: Icons.person_outline,
                     validator: (String? v) => (v == null || v.trim().isEmpty) ? 'مطلوب' : null),
                 const Divider(height: 1),
-                _buildDropdown(label: 'التخصص', icon: Icons.medical_services_outlined,
-                    value: _selectedSpec, items: kPhysicianSpecializations,
-                    onChanged: (String? v) => setState(() => _selectedSpec = v)),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  child: MedicalCategorySelector(
+                    key: _medicalCategoryKey,
+                    initialStoredSpec: _loadedDoctorSpecForMedicalUi,
+                    decorateDropdownField: (String labelText) => InputDecoration(
+                      labelText: labelText,
+                      labelStyle: GoogleFonts.cairo(fontSize: 13, color: const Color(0xFF607D8B)),
+                      filled: true,
+                      fillColor: const Color(0xFFF2F7FC),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Color(0xFF1976D2), width: 2),
+                      ),
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    ),
+                    introHeadingStyle: GoogleFonts.cairo(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      color: const Color(0xFF475569),
+                    ),
+                  ),
+                ),
                 const Divider(height: 1),
                 _buildDropdown(label: 'المحافظة', icon: Icons.location_city_outlined,
                     value: _selectedGove, items: kGovernorates,
@@ -988,15 +1076,10 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
                     children: <Widget>[
                       Row(
                         children: <Widget>[
-                          CircleAvatar(
+                          _buildBlurhashAvatar(
                             radius: 26,
-                            backgroundColor: const Color(0xFFE3F2FD),
-                            backgroundImage: _profileImageCtrl.text.trim().isNotEmpty
-                                ? NetworkImage(_profileImageCtrl.text.trim())
-                                : null,
-                            child: _profileImageCtrl.text.trim().isEmpty
-                                ? const Icon(Icons.person_outline, color: Color(0xFF42A5F5))
-                                : null,
+                            url: _profileImageCtrl.text.trim(),
+                            blurhash: _profileBlurhash,
                           ),
                           const SizedBox(width: 12),
                           Expanded(
@@ -1243,5 +1326,54 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
         },
       ),
     );
+  }
+
+  /// Avatar that fades-in over a BlurHash placeholder (or a tinted icon when
+  /// neither is available). Falls back gracefully on bad blurhashes.
+  Widget _buildBlurhashAvatar({
+    required double radius,
+    required String url,
+    required String? blurhash,
+  }) {
+    final double size = radius * 2;
+    Widget placeholder = Container(
+      width: size,
+      height: size,
+      color: const Color(0xFFE3F2FD),
+      alignment: Alignment.center,
+      child: const Icon(Icons.person_outline, color: Color(0xFF42A5F5)),
+    );
+    if (blurhash != null && blurhash.isNotEmpty) {
+      try {
+        placeholder = SizedBox(
+          width: size,
+          height: size,
+          child: BlurHash(hash: blurhash),
+        );
+      } catch (_) {
+        // keep default placeholder on bad hash
+      }
+    }
+
+    final Widget child = ClipOval(
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: url.isEmpty
+            ? placeholder
+            : Image.network(
+                url,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                loadingBuilder: (BuildContext context, Widget child, ImageChunkEvent? p) {
+                  if (p == null) return child;
+                  return placeholder;
+                },
+                errorBuilder: (BuildContext context, Object error, StackTrace? stack) =>
+                    placeholder,
+              ),
+      ),
+    );
+    return child;
   }
 }

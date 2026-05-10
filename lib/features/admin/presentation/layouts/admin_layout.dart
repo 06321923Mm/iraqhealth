@@ -1,13 +1,19 @@
+// ✅ UPDATED 2026-05-09
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../../core/auth/admin_session.dart';
 import '../../../../core/config/app_endpoints.dart';
+import '../../../../edit_suggestion/edit_suggestion_schema_service.dart';
+import '../../../../edit_suggestion/schema_models.dart';
 import '../../../../features/verification/data/models/verification_request_model.dart';
 import '../screens/clinics_management_screen.dart';
+import '../screens/pending_requests_screen.dart';
+import '../screens/reports_management_screen.dart';
 import '../screens/verification_review_screen.dart';
 
-enum _AdminSection { dashboard, verification, clinics }
+enum _AdminSection { dashboard, reports, pendingRequests, verification, clinics }
 
 /// Entry point for the admin hub.
 /// Double-guards access: the route handler in main.dart is the primary gate;
@@ -19,7 +25,8 @@ class AdminHubPage extends StatefulWidget {
   State<AdminHubPage> createState() => _AdminHubPageState();
 }
 
-class _AdminHubPageState extends State<AdminHubPage> {
+class _AdminHubPageState extends State<AdminHubPage>
+    with WidgetsBindingObserver {
   _AdminSection _section = _AdminSection.dashboard;
   bool _isChecking = true;
 
@@ -28,69 +35,204 @@ class _AdminHubPageState extends State<AdminHubPage> {
   int _totalDoctors        = 0;
   int _pendingVerif        = 0;
   int _onlineNow           = 0;
+  int _pendingReports      = 0;
+  int _pendingAdditions    = 0;
+  int _pendingVerifCount   = 0;
   bool _statsLoading       = true;
   List<Map<String, dynamic>> _recentVerifRequests = <Map<String, dynamic>>[];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final User? user = Supabase.instance.client.auth.currentUser;
-      if (user == null || user.userMetadata?['role'] != 'admin') {
+      if (!sessionUserIsAdmin(user)) {
         Navigator.of(context).pushReplacementNamed('/home');
         return;
       }
       setState(() => _isChecking = false);
       _loadStats();
+      _loadPendingVerificationCount();
     });
   }
 
-  Future<void> _loadStats() async {
-    setState(() => _statsLoading = true);
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed || !mounted || _isChecking) {
+      return;
+    }
+    if (_section == _AdminSection.dashboard) {
+      _loadStats();
+    }
+  }
+
+  /// تحديث أرقام الرئيسية عند الدخول للتبويب أو بعد العودة للتطبيق.
+  void _selectSection(_AdminSection section) {
+    setState(() => _section = section);
+    if (section == _AdminSection.dashboard) {
+      _loadStats();
+    }
+    if (section == _AdminSection.verification) {
+      _loadPendingVerificationCount();
+    }
+  }
+
+  Future<void> _loadPendingVerificationCount() async {
     try {
-      final int totalDoctors = await _db
-          .from(AppEndpoints.doctors)
-          .count(CountOption.exact);
-      final int pendingVerif = await _db
+      final int count = await _db
           .from(AppEndpoints.verificationRequests)
           .count(CountOption.exact)
           .eq('status', 'pending');
-      final int onlineNow = await _db
-          .from(AppEndpoints.doctors)
-          .count(CountOption.exact)
-          .eq('current_status', 'online');
-      final List<dynamic> recentRes = await _db
-          .from(AppEndpoints.verificationRequests)
-          .select('id, doctor_id, status, created_at, admin_notes')
-          .order('created_at', ascending: false)
-          .limit(5);
+      if (!mounted) return;
+      setState(() => _pendingVerifCount = count);
+    } catch (_) {}
+  }
+
+  Future<void> _loadStats() async {
+    try {
+      final EditSuggestionSchemaBundle reportsSchema =
+          await EditSuggestionSchemaService(_db).loadBundle();
+      final String reportsTable = reportsSchema.ok &&
+              reportsSchema.reportsTable.isNotEmpty
+          ? reportsSchema.reportsTable
+          : AppEndpoints.reports;
+
+      final List<String> statErrors = <String>[];
+
+      Future<int> countOr(String label, Future<int> Function() run) async {
+        try {
+          return await run();
+        } catch (e) {
+          statErrors.add('$label: $e');
+          return 0;
+        }
+      }
+
+      Future<List<Map<String, dynamic>>> loadRecent() async {
+        try {
+          final List<dynamic> rows = await _db
+              .from(AppEndpoints.verificationRequests)
+              .select('id, doctor_id, status, created_at, admin_notes')
+              .order('created_at', ascending: false)
+              .limit(5);
+          return rows.cast<Map<String, dynamic>>();
+        } catch (e) {
+          statErrors.add('آخر التوثيق: $e');
+          return <Map<String, dynamic>>[];
+        }
+      }
+
+      final int totalDoctors = await countOr(
+        'الأطباء',
+        () => _db.from(AppEndpoints.doctors).count(CountOption.exact),
+      );
+      final int pendingVerif = await countOr(
+        'التوثيق',
+        () => _db
+            .from(AppEndpoints.verificationRequests)
+            .count(CountOption.exact)
+            .eq('status', 'pending'),
+      );
+      final int onlineNow = await countOr(
+        'المتصلين',
+        () => _db
+            .from(AppEndpoints.doctors)
+            .count(CountOption.exact)
+            .eq('current_status', 'online'),
+      );
+      final int pendingReports = await countOr(
+        'التقارير',
+        () => _db
+            .from(reportsTable)
+            .count(CountOption.exact)
+            .eq('status', 'pending'),
+      );
+      final int pendingDoctorsCount = await countOr(
+        'طلبات الإضافة',
+        () =>
+            _db.from(AppEndpoints.pendingDoctors).count(CountOption.exact),
+      );
+      final int pendingClaims = await countOr(
+        'الاستحواذ',
+        () => _db
+            .from(AppEndpoints.clinicClaimRequests)
+            .count(CountOption.exact)
+            .eq('status', 'pending'),
+      );
+      final List<Map<String, dynamic>> recentRes = await loadRecent();
 
       if (!mounted) return;
       setState(() {
         _totalDoctors        = totalDoctors;
         _pendingVerif        = pendingVerif;
         _onlineNow           = onlineNow;
-        _recentVerifRequests = recentRes.cast<Map<String, dynamic>>();
+        _pendingReports      = pendingReports;
+        _pendingAdditions    = pendingDoctorsCount + pendingClaims;
+        _recentVerifRequests = recentRes;
         _statsLoading        = false;
       });
+
+      if (statErrors.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'بعض الإحصائيات لم تُحمَّل:\n${statErrors.take(3).join('\n')}',
+              textDirection: TextDirection.rtl,
+            ),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      }
     } catch (e) {
-      if (mounted) setState(() => _statsLoading = false);
+      if (!mounted) return;
+      setState(() => _statsLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'تعذر تحديث الإحصائيات: $e',
+            textDirection: TextDirection.rtl,
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
-  static const List<({_AdminSection section, IconData icon, String label})>
-      _kItems = <({_AdminSection section, IconData icon, String label})>[
-    (section: _AdminSection.dashboard,     icon: Icons.dashboard_outlined,       label: 'الرئيسية'),
-    (section: _AdminSection.verification,  icon: Icons.verified_user_outlined,   label: 'التوثيق'),
-    (section: _AdminSection.clinics,       icon: Icons.local_hospital_outlined,  label: 'العيادات'),
+  static const List<({
+    _AdminSection section,
+    IconData icon,
+    IconData selectedIcon,
+    String label
+  })> _kItems = <({
+    _AdminSection section,
+    IconData icon,
+    IconData selectedIcon,
+    String label
+  })>[
+    (section: _AdminSection.dashboard, icon: Icons.dashboard_outlined, selectedIcon: Icons.dashboard, label: 'الرئيسية'),
+    (section: _AdminSection.reports, icon: Icons.rate_review_outlined, selectedIcon: Icons.rate_review, label: 'اقتراحات التعديل'),
+    (section: _AdminSection.pendingRequests, icon: Icons.pending_actions_outlined, selectedIcon: Icons.pending_actions, label: 'طلبات الإضافة'),
+    (section: _AdminSection.verification, icon: Icons.verified_user_outlined, selectedIcon: Icons.verified_user, label: 'التوثيق'),
+    (section: _AdminSection.clinics, icon: Icons.local_hospital_outlined, selectedIcon: Icons.local_hospital, label: 'العيادات'),
   ];
 
   Widget _buildBody() {
     return switch (_section) {
-      _AdminSection.dashboard    => _buildDashboard(),
-      _AdminSection.verification => const VerificationReviewScreen(),
-      _AdminSection.clinics      => const ClinicsManagementScreen(),
+      _AdminSection.dashboard       => _buildDashboard(),
+      _AdminSection.reports         => const ReportsManagementScreen(),
+      _AdminSection.pendingRequests => const PendingRequestsScreen(),
+      _AdminSection.verification    => const VerificationReviewScreen(),
+      _AdminSection.clinics         => const ClinicsManagementScreen(),
     };
   }
 
@@ -103,6 +245,7 @@ class _AdminHubPageState extends State<AdminHubPage> {
     return RefreshIndicator(
       onRefresh: _loadStats,
       child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(20),
         children: <Widget>[
           _buildDashHeader(),
@@ -156,8 +299,20 @@ class _AdminHubPageState extends State<AdminHubPage> {
         _StatCard(
           label: 'طلبات التوثيق المعلقة',
           value: _pendingVerif.toString(),
-          icon:  Icons.pending_actions_outlined,
+          icon:  Icons.verified_user_outlined,
           color: const Color(0xFFF9A825),
+        ),
+        _StatCard(
+          label: 'اقتراحات التعديل المعلقة',
+          value: _pendingReports.toString(),
+          icon:  Icons.rate_review_outlined,
+          color: const Color(0xFFFF7043),
+        ),
+        _StatCard(
+          label: 'طلبات الإضافة المعلقة',
+          value: _pendingAdditions.toString(),
+          icon:  Icons.pending_actions_outlined,
+          color: const Color(0xFF7E57C2),
         ),
         _StatCard(
           label: 'العيادات المتاحة الآن',
@@ -261,9 +416,9 @@ class _AdminHubPageState extends State<AdminHubPage> {
   @override
   Widget build(BuildContext context) {
     if (_isChecking) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF1D3557),
-        body: Center(
+      return Scaffold(
+        backgroundColor: Theme.of(context).colorScheme.surface,
+        body: const Center(
           child: CircularProgressIndicator(color: Color(0xFF42A5F5)),
         ),
       );
@@ -280,8 +435,9 @@ class _AdminHubPageState extends State<AdminHubPage> {
                 backgroundColor: const Color(0xFF1D3557),
                 foregroundColor: Colors.white,
                 centerTitle: true,
+                elevation: 0,
                 title: Text(
-                  'لوحة الإدارة',
+                  'لوحة التحكم',
                   style: GoogleFonts.cairo(fontWeight: FontWeight.w700),
                 ),
               ),
@@ -294,6 +450,55 @@ class _AdminHubPageState extends State<AdminHubPage> {
                 ],
               )
             : _buildBody(),
+        bottomNavigationBar: wide
+            ? null
+            : NavigationBar(
+                indicatorColor: const Color(0xFFE3F2FD),
+                labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+                selectedIndex: _kItems.indexWhere((e) => e.section == _section),
+                onDestinationSelected: (int index) {
+                  _selectSection(_kItems[index].section);
+                },
+                destinations: _kItems.map((item) {
+                  Widget icon = Icon(item.icon);
+                  Widget selectedIcon = Icon(item.selectedIcon);
+                  if (item.section == _AdminSection.verification &&
+                      _pendingVerifCount > 0) {
+                    Widget withBadge(Widget child) => Stack(
+                          clipBehavior: Clip.none,
+                          children: <Widget>[
+                            child,
+                            Positioned(
+                              right: -6,
+                              top: -6,
+                              child: Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: const BoxDecoration(
+                                  color: Colors.red,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Text(
+                                  '$_pendingVerifCount',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                    icon = withBadge(icon);
+                    selectedIcon = withBadge(selectedIcon);
+                  }
+                  return NavigationDestination(
+                    icon: icon,
+                    selectedIcon: selectedIcon,
+                    label: item.label,
+                  );
+                }).toList(),
+              ),
       ),
     );
   }
@@ -335,7 +540,7 @@ class _AdminHubPageState extends State<AdminHubPage> {
                 label: item.label,
                 icon: item.icon,
                 selected: _section == item.section,
-                onTap: () => setState(() => _section = item.section),
+                onTap: () => _selectSection(item.section),
               )),
           const Spacer(),
           Padding(
@@ -394,7 +599,7 @@ class _AdminHubPageState extends State<AdminHubPage> {
                               : const Color(0xFF90A4AE))),
                   selected: _section == item.section,
                   onTap: () {
-                    setState(() => _section = item.section);
+                    _selectSection(item.section);
                     Navigator.of(context).pop();
                   },
                 )),

@@ -33,10 +33,17 @@ class VerificationRequestModel {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  /// Supabase may return [doctor_id] as int (bigint) or String after schema migrations.
+  static String _idToString(dynamic value) {
+    if (value == null) return '';
+    if (value is String) return value;
+    return value.toString();
+  }
+
   factory VerificationRequestModel.fromJson(Map<String, dynamic> json) {
     return VerificationRequestModel(
       id:                  json['id'] as String,
-      doctorId:            json['doctor_id'] as String,
+      doctorId:            _idToString(json['doctor_id']),
       status:              VerificationStatusX.fromString(json['status'] as String?),
       idCardFrontUrl:      json['id_card_front_url'] as String?,
       idCardBackUrl:       json['id_card_back_url'] as String?,

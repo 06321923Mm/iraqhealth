@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../core/auth/admin_session.dart';
+import '../services/crashlytics_service.dart';
 import '../splash_screen.dart';
 import 'login_screen.dart';
 
@@ -14,14 +18,32 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
+  StreamSubscription<AuthState>? _authSub;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _authSub = Supabase.instance.client.auth.onAuthStateChange
+        .listen(_onAuthStateChanged);
+  }
+
+  void _onAuthStateChanged(AuthState state) {
+    if (state.event == AuthChangeEvent.signedIn) {
+      final User? user = Supabase.instance.client.auth.currentUser;
+      final String role = sessionUserIsAdmin(user) ? 'admin' : 'user';
+      final String? gove = user?.userMetadata?['governorate'] as String?;
+      CrashlyticsService.instance.setUser(
+        user?.id,
+        role: role,
+        governorate: gove,
+      );
+    }
   }
 
   @override
   void dispose() {
+    _authSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'services/forward_geocode_service.dart';
+import 'services/location_permission_service.dart';
 import 'services/reverse_geocode_service.dart';
 
 /// Result of picking a point on the map (or manual entry fallback on web).
@@ -239,36 +240,10 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
         return;
       }
 
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied) {
-        if (!mounted) {
-          return;
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تم رفض إذن الموقع.')),
-        );
-        return;
-      }
-      if (permission == LocationPermission.deniedForever) {
-        if (!mounted) {
-          return;
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: const Text('إذن الموقع مرفوض دائماً. يمكنك تفعيله من إعدادات التطبيق.'),
-            action: SnackBarAction(
-              label: 'إعدادات التطبيق',
-              onPressed: () async {
-                await Geolocator.openAppSettings();
-              },
-            ),
-          ),
-        );
-        return;
-      }
+      if (!mounted) return;
+      final bool granted =
+          await LocationPermissionService.requestWithRationale(context);
+      if (!granted) return;
 
       final Position pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(

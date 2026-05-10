@@ -30,6 +30,7 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- ✅ OAuth intent-filter verified 2026-05-09 -->
             <!-- إعادة توجيه Supabase OAuth (Google/Facebook) بعد PKCE -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>

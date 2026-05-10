@@ -21,12 +21,16 @@ import 'app_navigation.dart';
 import 'auth/auth_gate.dart';
 import 'doctor_constants.dart';
 import 'doctor_dashboard/my_clinic_screen.dart';
+import 'core/auth/admin_session.dart';
+import 'core/config/app_endpoints.dart';
 import 'env/app_env.dart';
 import 'data/doctor_coordinates.dart';
 import 'doctor_location_repository.dart';
 import 'doctor_model.dart';
 import 'location_picker_screen.dart';
+import 'medical_field.dart';
 import 'widgets/doctor_map_location_field.dart';
+import 'widgets/medical_category_selector.dart';
 import 'arabic_search_normalize.dart';
 import 'favorites_provider.dart';
 import 'search_suggestions.dart';
@@ -36,41 +40,15 @@ import 'pwa_install_stub.dart'
 import 'supabase_write_errors.dart';
 import 'edit_suggestion/edit_suggestion_schema_service.dart';
 import 'edit_suggestion/schema_models.dart';
-import 'edit_suggestion/dynamic_report_insert.dart';
-import 'edit_suggestion/column_edit_semantics.dart';
-import 'edit_suggestion/arabic_column_label.dart';
+import 'widgets/doctor_list_skeleton.dart';
 import 'widgets/dynamic_edit_suggestion_form.dart';
 import 'features/admin/presentation/layouts/admin_layout.dart';
+import 'services/auth_service.dart';
 import 'services/fcm_token_service.dart';
-
-const String kDropdownAddCustom = '__add_custom__';
-
-enum _MedicalFieldType {
-  physician,
-  radiology,
-  dentist,
-  pharmacy,
-  lab,
-}
-
-
-/// القيم القانونية (canonical) المخزّنة في عمود `spec` لتمييز فئات الأزرار
-/// السريعة في نموذج «إضافة/تعديل عيادة». تُستخدم في `_buildSpec()` و
-/// `_initSpec()` للحفاظ على تطابق الفئات مع قاعدة البيانات.
-const String kSpecDentistry = 'طب وتجميل الاسنان';
-const String kSpecPharmacy = 'الصيدليات';
-const String kSpecLaboratory = 'المختبرات الطبية';
-const String kSpecRadiology = 'الاشعة والسونار';
-
-/// خيارات نوع الأشعة عند اختيار «اشعة وسونار» في النموذج. القيمة الأولى هي
-/// القيمة القانونية الموجودة حالياً في قاعدة البيانات؛ تبقى الباقي للحفاظ على
-/// المرونة في التوسعة لاحقاً.
-const List<String> kImagingModalityOptions = <String>[
-  'الاشعة والسونار',
-  'الاشعة والسونار والرنين',
-  'الاشعة والسونار والمفراس',
-  'الاشعة والسونار والمفراس والرنين',
-];
+import 'core/cache/connectivity_service.dart';
+import 'core/cache/hive_cache_service.dart';
+import 'core/cache/sp_doctors_cache.dart';
+import 'services/crashlytics_service.dart';
 
 const String _kAdminPasswordFromDefine =
     String.fromEnvironment('ADMIN_PASSWORD');
@@ -166,37 +144,6 @@ const Map<String, String> kInfoCorrectionTypeLabels = <String, String>{
   'other': 'معلومة أخرى',
 };
 
-/// قائمة مناطق محافظة البصرة المستخدمة في نموذج إضافة/تعديل العيادة.
-/// مرتّبة وفق المناطق الموجودة فعلياً في قاعدة بيانات Supabase
-/// (المناطق الجغرافية فقط، دون أسماء المستشفيات).
-const List<String> kBasraAreas = <String>[
-  'ابي الخصيب',
-  'ام قصر',
-  'التنومة',
-  'الجزائر',
-  'الجزيرة',
-  'الجمعيات',
-  'الجمهورية',
-  'الجنينة',
-  'الحيانية',
-  'الدير',
-  'الزبير',
-  'العباسية',
-  'العشار',
-  'الفاو',
-  'القبلة',
-  'القرنة',
-  'المدينة',
-  'الهارثة',
-  'بريهة',
-  'خمسة ميل',
-  'خور الزبير',
-  'سفوان',
-  'عشار',
-  'كرمة علي',
-  'مجمع الامل السكنية',
-];
-
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
@@ -212,11 +159,21 @@ Future<void> main() async {
       options: DefaultFirebaseOptions.currentPlatform,
     );
     await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
+    final PackageInfo pkgInfo = await PackageInfo.fromPlatform();
+    CrashlyticsService.instance.setAppContext(
+      version: pkgInfo.version,
+      build: pkgInfo.buildNumber,
+    );
     FlutterError.onError = (FlutterErrorDetails details) {
-      FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+      CrashlyticsService.instance.logError(
+        details.exception,
+        details.stack,
+        reason: 'flutter_framework_error',
+        fatal: false,
+      );
     };
     PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
-      FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+      CrashlyticsService.instance.logError(error, stack, fatal: true);
       return true;
     };
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
@@ -231,6 +188,8 @@ Future<void> main() async {
       authFlowType: AuthFlowType.pkce,
     ),
   );
+
+  await HiveCacheService.init();
 
   runApp(
     ChangeNotifierProvider<FavoritesProvider>(
@@ -299,7 +258,7 @@ class IraqHealthApp extends StatelessWidget {
           if (guardUser == null) {
             return buildAdaptiveRtlRoute<Object?>(const AuthGate());
           }
-          if (guardUser.userMetadata?['role'] != 'admin') {
+          if (!sessionUserIsAdmin(guardUser)) {
             return buildAdaptiveRtlRoute<Object?>(
               const Directionality(
                 textDirection: TextDirection.rtl,
@@ -339,6 +298,13 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   String? _selectedSpecialization;
   bool _isLoading = true;
   String? _errorMessage;
+  bool _isCachedData = false;
+  String? _cacheTimestamp;
+
+  bool _showOfflineBanner = false;
+  bool _showRetryButton = false;
+  DateTime? _lastSyncTime;
+  bool _isRefreshing = false;
 
   List<Doctor> _allDoctors = <Doctor>[];
   List<Doctor> _filteredDoctors = <Doctor>[];
@@ -351,6 +317,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   int _homeNavIndex = 0;
   Timer? _suggestionDebounceTimer;
   Timer? _searchAnalyticsDebounceTimer;
+  StreamSubscription<AuthState>? _authStateSub;
+  StreamSubscription<bool>? _connectivitySub;
   List<SearchSuggestionRow> _searchSuggestions = <SearchSuggestionRow>[];
 
   static const List<String> _kPopularSearchSpecs = <String>[
@@ -364,6 +332,19 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     super.initState();
     _searchController.addListener(_onSearchTextChanged);
     _searchFocusNode.addListener(_onSearchFocusChanged);
+    // Rebuild when auth state flips so the "عيادتي" tab and admin-only
+    // map controls appear / disappear immediately on login or logout.
+    _authStateSub = Supabase.instance.client.auth.onAuthStateChange.listen(
+      (AuthState _) {
+        if (mounted) setState(() {});
+      },
+    );
+    _connectivitySub = ConnectivityService.onlineStream().listen((bool online) {
+      CrashlyticsService.instance.setNetworkState(online);
+      if (online && _showOfflineBanner && mounted) {
+        setState(() => _showOfflineBanner = false);
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _showDisclaimerIfNeeded();
       if (mounted) _checkForUpdate();
@@ -450,100 +431,219 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   Future<void> _loadDoctors() async {
+    final String gove = _selectedGovernorate ?? 'البصرة';
     setState(() {
       _isLoading = true;
       _errorMessage = null;
-    });
-
-    try {
+      _isCachedData = false;
+      _cacheTimestamp = null;
+      _showOfflineBanner = false;
+      _showRetryButton = false;
       _allDoctors = <Doctor>[];
       _filteredDoctors = <Doctor>[];
       _areas = <String>[];
       _specializations = <String>[];
-      final List<dynamic> allData = <dynamic>[];
-      int from = 0;
+    });
 
-      while (true) {
-        final List<dynamic> response = await _supabase
-            .from(kSupabaseDoctorsTable)
-            .select(
-              'id, spec, name, addr, area, ph, ph2, notes, gove, latitude, longitude',
-            )
-.eq('gove', _selectedGovernorate ?? 'البصرة')
-.order('id', ascending: true)
-            .range(from, from + _batchSize - 1);
+    // 1. Cache-first: serve from SpDoctorsCache immediately (no spinner).
+    final List<Map<String, dynamic>>? cached = await SpDoctorsCache.load(gove);
+    if (cached != null && cached.isNotEmpty) {
+      if (!mounted) return;
+      _allDoctors = cached
+          .map((Map<String, dynamic> json) => Doctor.fromJson(json))
+          .toList();
+      _rebuildFiltersFromAllDoctors(gove);
+      _applyFilters();
+      setState(() => _isLoading = false);
+    }
 
-        allData.addAll(response);
-        if (response.length < _batchSize) {
-          break;
+    // 2. Always trigger a background network refresh, whether cache hit or not.
+    unawaited(_backgroundRefresh(gove, forceRefresh: true));
+  }
+
+  Future<void> _backgroundRefresh(
+    String gove, {
+    bool forceRefresh = false,
+  }) async {
+    if (_isRefreshing && !forceRefresh) return;
+    if (mounted) setState(() => _isRefreshing = true);
+
+    try {
+      final bool online = await ConnectivityService.isOnline();
+
+      if (!online) {
+        if (!mounted) return;
+        if (_allDoctors.isEmpty) {
+          setState(() {
+            _showRetryButton = true;
+            _isLoading = false;
+          });
+        } else {
+          setState(() => _showOfflineBanner = true);
         }
-        from += _batchSize;
+        return;
       }
 
-      _allDoctors = allData
+      // Online: prefer keyset RPC, fall back to range pagination.
+      List<dynamic> allData = <dynamic>[];
+      try {
+        allData = await _fetchDoctorsViaKeysetRpc(gove);
+      } catch (keysetErr, keysetSt) {
+        debugPrint(
+          'Keyset RPC unavailable (${AppEndpoints.getDoctorsPageKeyset}), '
+          'using range fallback: $keysetErr',
+        );
+        debugPrint('$keysetSt');
+        allData = await _fetchDoctorsViaRange(gove);
+      }
+
+      final List<Doctor> doctors = allData
           .map((dynamic json) => Doctor.fromJson(json as Map<String, dynamic>))
           .toList();
 
-      final Map<String, int> areaCounts = <String, int>{};
-      final Map<String, int> specCounts = <String, int>{};
-      for (final Doctor d in _allDoctors) {
-        final String area = d.area.trim();
-        if (area.isNotEmpty) {
-          areaCounts[area] = (areaCounts[area] ?? 0) + 1;
-        }
-        final String spec = d.spec.trim();
-        if (spec.isNotEmpty) {
-          specCounts[spec] = (specCounts[spec] ?? 0) + 1;
-        }
-      }
-
-      _areas = areaCounts.keys.toList()
-        ..sort((String a, String b) {
-          final int ca = areaCounts[a] ?? 0;
-          final int cb = areaCounts[b] ?? 0;
-          final int byCount = cb.compareTo(ca);
-          if (byCount != 0) {
-            return byCount;
-          }
-          return a.compareTo(b);
-        });
-
-      _specializations = specCounts.keys.toList()
-        ..sort((String a, String b) {
-          final int ca = specCounts[a] ?? 0;
-          final int cb = specCounts[b] ?? 0;
-          final int byCount = cb.compareTo(ca);
-          if (byCount != 0) {
-            return byCount;
-          }
-          return a.compareTo(b);
-        });
-
-      _moveIraqiDentalPracticeLabelToSixth(_specializations);
-
-      if (_selectedArea != null && !_areas.contains(_selectedArea)) {
-        _selectedArea = null;
-      }
-      if (_selectedSpecialization != null &&
-          !_specializations.contains(_selectedSpecialization)) {
-        _selectedSpecialization = null;
-      }
-
-      _applyFilters();
-    } catch (error, stackTrace) {
-      debugPrint('Supabase doctors fetch error: $error');
-      debugPrint('Supabase doctors fetch stackTrace: $stackTrace');
       if (!mounted) return;
+
+      if (doctors.isNotEmpty) {
+        unawaited(
+          SpDoctorsCache.save(gove, allData.cast<Map<String, dynamic>>()),
+        );
+      }
+
       setState(() {
-        _errorMessage = _humanReadableLoadError(error);
+        _allDoctors = doctors;
+        _lastSyncTime = DateTime.now();
+        _showOfflineBanner = false;
+        _showRetryButton = false;
+        _isLoading = false;
+        _errorMessage = null;
       });
-    } finally {
+      _rebuildFiltersFromAllDoctors(gove);
+      _applyFilters();
+
       if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('آخر تحديث: الآن'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('_backgroundRefresh error: $error');
+      debugPrint('$stackTrace');
+      CrashlyticsService.instance.logApiFailure(
+        AppEndpoints.getDoctorsPageKeyset,
+        error,
+        stackTrace,
+      );
+      if (!mounted) return;
+      // Only surface errors when there's nothing cached to show.
+      if (_allDoctors.isEmpty) {
         setState(() {
+          _errorMessage = _humanReadableLoadError(error);
           _isLoading = false;
         });
       }
+    } finally {
+      if (mounted) setState(() => _isRefreshing = false);
     }
+  }
+
+  /// Builds [_areas] and [_specializations] from the current [_allDoctors] list.
+  /// Called from both the online fetch path and the offline cache path.
+  void _rebuildFiltersFromAllDoctors(String gove) {
+    final Map<String, int> areaCounts = <String, int>{};
+    final Map<String, int> specCounts = <String, int>{};
+    for (final Doctor d in _allDoctors) {
+      final String area = d.area.trim();
+      if (area.isNotEmpty) {
+        areaCounts[area] = (areaCounts[area] ?? 0) + 1;
+      }
+      final String spec = d.spec.trim();
+      if (spec.isNotEmpty) {
+        specCounts[spec] = (specCounts[spec] ?? 0) + 1;
+      }
+    }
+    _areas = areaCounts.keys.toList()
+      ..sort((String a, String b) {
+        final int ca = areaCounts[a] ?? 0;
+        final int cb = areaCounts[b] ?? 0;
+        final int byCount = cb.compareTo(ca);
+        return byCount != 0 ? byCount : a.compareTo(b);
+      });
+    _specializations = specCounts.keys.toList()
+      ..sort((String a, String b) {
+        final int ca = specCounts[a] ?? 0;
+        final int cb = specCounts[b] ?? 0;
+        final int byCount = cb.compareTo(ca);
+        return byCount != 0 ? byCount : a.compareTo(b);
+      });
+    _moveIraqiDentalPracticeLabelToSixth(_specializations);
+    if (_selectedArea != null && !_areas.contains(_selectedArea)) {
+      _selectedArea = null;
+    }
+    if (_selectedSpecialization != null &&
+        !_specializations.contains(_selectedSpecialization)) {
+      _selectedSpecialization = null;
+    }
+  }
+
+  static const String _kDoctorListSelectMinimal =
+      'id, spec, name, addr, area, ph, ph2, notes, gove, latitude, longitude';
+
+  /// Keyset pages via Supabase RPC (requires migration `get_doctors_page_keyset`).
+  Future<List<dynamic>> _fetchDoctorsViaKeysetRpc(String gove) async {
+    final List<dynamic> allData = <dynamic>[];
+    int lastId = 0;
+    while (true) {
+      final dynamic raw = await _supabase.rpc(
+        AppEndpoints.getDoctorsPageKeyset,
+        params: <String, dynamic>{
+          'p_gove': gove,
+          'p_limit': _batchSize,
+          'p_last_id': lastId,
+        },
+      );
+      final List<dynamic> response = raw is List ? raw : <dynamic>[];
+
+      if (response.isEmpty) {
+        break;
+      }
+      allData.addAll(response);
+      if (response.length < _batchSize) {
+        break;
+      }
+      final dynamic lastRaw =
+          (response.last as Map<String, dynamic>)['id'];
+      final int? nextId = lastRaw is int
+          ? lastRaw
+          : int.tryParse(lastRaw?.toString() ?? '');
+      if (nextId == null || nextId <= lastId) {
+        break;
+      }
+      lastId = nextId;
+    }
+    return allData;
+  }
+
+  /// Legacy offset/range pagination — works without the keyset RPC.
+  Future<List<dynamic>> _fetchDoctorsViaRange(String gove) async {
+    final List<dynamic> allData = <dynamic>[];
+    int from = 0;
+    while (true) {
+      final List<dynamic> response = await _supabase
+          .from(kSupabaseDoctorsTable)
+          .select(_kDoctorListSelectMinimal)
+          .eq('gove', gove)
+          .order('id', ascending: true)
+          .range(from, from + _batchSize - 1);
+      allData.addAll(response);
+      if (response.length < _batchSize) {
+        break;
+      }
+      from += _batchSize;
+    }
+    return allData;
   }
 
   /// رسالة "قريباً" للمحافظات التي لا تحتوي على أطباء بعد.
@@ -618,6 +718,43 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       return 'تعذر تحميل بيانات الأطباء (خطأ في الخادم): ${error.message}';
     }
     return 'تعذر تحميل بيانات الأطباء حالياً. حاول مرة أخرى.';
+  }
+
+  String _formatSyncAge(DateTime t) {
+    final int minutes = DateTime.now().difference(t).inMinutes;
+    if (minutes < 1) return 'الآن';
+    if (minutes < 60) return '$minutes دقيقة';
+    final int hours = DateTime.now().difference(t).inHours;
+    return '$hours ساعة';
+  }
+
+  Widget _buildOfflineRetryView() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            const Icon(Icons.cloud_off, size: 64, color: Color(0xFFB0BEC5)),
+            const SizedBox(height: 16),
+            const Text(
+              'لا يوجد اتصال بالإنترنت',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1D3557),
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _loadDoctors,
+              child: const Text('إعادة المحاولة'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _upsertReportCount(int doctorId) async {
@@ -984,7 +1121,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                       _detailField('التخصص', d.spec),
                       _detailField('المنطقة', d.area),
                       _detailField('العنوان', d.addr),
-                      if (d.hasCoordinates)
+                      if (d.hasCoordinates &&
+                          sessionUserIsAdmin(Supabase
+                              .instance.client.auth.currentUser))
                         _detailField(
                           'الإحداثيات',
                           '${d.latitude!.toStringAsFixed(5)}, ${d.longitude!.toStringAsFixed(5)}',
@@ -993,7 +1132,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                       _detailField('الهاتف الثاني', d.ph2),
                       _detailField('ملاحظات', d.notes),
                       _detailField('رقم السجل', d.id > 0 ? '${d.id}' : ''),
-                      if (d.id > 0) ...<Widget>[
+                      if (d.id > 0 &&
+                          sessionUserIsAdmin(Supabase
+                              .instance.client.auth.currentUser)) ...<Widget>[
                         const SizedBox(height: 16),
                         const Text(
                           'هل موقع العيادة على الخريطة صحيح؟',
@@ -1136,7 +1277,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                         ],
                       ),
                       const SizedBox(height: 10),
-                      if (d.hasCoordinates)
+                      if (d.hasCoordinates &&
+                          sessionUserIsAdmin(Supabase
+                              .instance.client.auth.currentUser))
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: OutlinedButton.icon(
@@ -1226,10 +1369,10 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         children: <Widget>[
           Text(
             label,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: Color(0xFF718096),
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 6),
@@ -1312,11 +1455,26 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     _adminTapResetTimer?.cancel();
     _suggestionDebounceTimer?.cancel();
     _searchAnalyticsDebounceTimer?.cancel();
+    _authStateSub?.cancel();
+    _authStateSub = null;
+    _connectivitySub?.cancel();
+    _connectivitySub = null;
     _searchController.removeListener(_onSearchTextChanged);
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  /// تسجيل خروج متاح من الشاشة الرئيسية لجميع المستخدمين (زر «عيادتي» كان يقتصر على الأدمن).
+  Future<void> _signOutFromHome() async {
+    try {
+      await AuthService(Supabase.instance.client).signOut();
+    } catch (_) {
+      await Supabase.instance.client.auth.signOut();
+    }
+    if (!mounted) return;
+    Navigator.of(context).pushNamedAndRemoveUntil('/', (_) => false);
   }
 
   @override
@@ -1325,9 +1483,14 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     const Color sectionShadow = Color(0x1A000000);
     final double listBottomInset =
         MediaQuery.paddingOf(context).bottom + 88 + 56;
+    final bool isAdmin =
+        sessionUserIsAdmin(Supabase.instance.client.auth.currentUser);
+    // Clamp index when the "عيادتي" tab is hidden to avoid showing an empty stack.
+    final int safeNavIndex =
+        (!isAdmin && _homeNavIndex >= 2) ? 0 : _homeNavIndex;
 
     return Scaffold(
-      floatingActionButton: _homeNavIndex == 0
+      floatingActionButton: safeNavIndex == 0
           ? FloatingActionButton(
               onPressed: () => Navigator.pushNamed(context, '/add-clinic'),
               tooltip: 'إضافة عيادة',
@@ -1340,35 +1503,41 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
       bottomNavigationBar: NavigationBar(
         height: 64,
-        selectedIndex: _homeNavIndex,
+        selectedIndex: safeNavIndex,
         backgroundColor: Colors.white,
         surfaceTintColor: Colors.transparent,
         indicatorColor: primaryMedicalBlue.withValues(alpha: 0.2),
         onDestinationSelected: (int index) {
           setState(() => _homeNavIndex = index);
         },
-        destinations: const <NavigationDestination>[
-          NavigationDestination(
+        destinations: <NavigationDestination>[
+          const NavigationDestination(
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home_rounded),
             label: 'الرئيسية',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.favorite_border_rounded),
             selectedIcon: Icon(Icons.favorite_rounded),
             label: 'أطبائي',
           ),
-          NavigationDestination(
-            icon: Icon(Icons.store_outlined),
-            selectedIcon: Icon(Icons.store_rounded),
-            label: 'عيادتي',
-          ),
+          if (isAdmin)
+            const NavigationDestination(
+              icon: Icon(Icons.store_outlined),
+              selectedIcon: Icon(Icons.store_rounded),
+              label: 'عيادتي',
+            ),
         ],
       ),
       body: IndexedStack(
-        index: _homeNavIndex,
+        index: safeNavIndex,
         children: <Widget>[
-          CustomScrollView(
+          RefreshIndicator(
+            onRefresh: () => _backgroundRefresh(
+              _selectedGovernorate ?? 'البصرة',
+              forceRefresh: true,
+            ),
+          child: CustomScrollView(
         slivers: <Widget>[
           SliverAppBar(
             pinned: true,
@@ -1401,6 +1570,61 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
               ),
             ),
             actions: <Widget>[
+              // Last sync timestamp
+              if (_lastSyncTime != null)
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(start: 4),
+                  child: Center(
+                    child: Text(
+                      'محدّث قبل ${_formatSyncAge(_lastSyncTime!)}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                ),
+              // Offline indicator
+              StreamBuilder<bool>(
+                stream: ConnectivityService.onlineStream(),
+                builder:
+                    (BuildContext context, AsyncSnapshot<bool> snap) {
+                  final bool online = snap.data ?? true;
+                  if (online) return const SizedBox.shrink();
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4),
+                    child: Icon(
+                      Icons.wifi_off_rounded,
+                      color: Colors.orange,
+                      size: 20,
+                    ),
+                  );
+                },
+              ),
+              // Manual refresh / spinner
+              if (_isRefreshing)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  child: Center(
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                )
+              else
+                IconButton(
+                  tooltip: 'تحديث',
+                  onPressed: () => _backgroundRefresh(
+                    _selectedGovernorate ?? 'البصرة',
+                    forceRefresh: true,
+                  ),
+                  icon: const Icon(Icons.refresh),
+                ),
               IconButton(
                 tooltip:
                     _searchFieldVisible ? 'إغلاق البحث' : 'بحث',
@@ -1409,9 +1633,14 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                   _searchFieldVisible ? Icons.close : Icons.search,
                 ),
               ),
-              if (Supabase.instance.client.auth.currentUser
-                      ?.userMetadata?['role'] ==
-                  'admin')
+              if (Supabase.instance.client.auth.currentSession != null)
+                IconButton(
+                  tooltip: 'تسجيل الخروج',
+                  onPressed: _signOutFromHome,
+                  icon: const Icon(Icons.logout_outlined),
+                ),
+              if (sessionUserIsAdmin(
+                  Supabase.instance.client.auth.currentUser))
                 IconButton(
                   tooltip: 'لوحة الإدارة',
                   onPressed: () =>
@@ -1580,25 +1809,75 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 12, 4),
-              child: Text(
-                'أحدث العيادات المضافة',
-                style: const TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF1D3557),
-                ),
+              child: Row(
+                children: <Widget>[
+                  const Expanded(
+                    child: Text(
+                      'أحدث العيادات المضافة',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1D3557),
+                      ),
+                    ),
+                  ),
+                  if (_isCachedData && _cacheTimestamp != null)
+                    Text(
+                      'بيانات محفوظة · $_cacheTimestamp',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFFB0BEC5),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
+          // Amber banner: visible when offline but cached data is shown.
+          SliverToBoxAdapter(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              height: _showOfflineBanner ? 40 : 0,
+              color: Colors.amber.shade700,
+              child: _showOfflineBanner
+                  ? const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: <Widget>[
+                        Icon(
+                          Icons.wifi_off_rounded,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                        SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            'تتصفح النسخة المحفوظة',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            textDirection: TextDirection.rtl,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
           if (_isLoading)
+            SliverToBoxAdapter(
+              child: Semantics(
+                label: 'جارٍ التحميل',
+                child: const DoctorListSkeleton(),
+              ),
+            )
+          else if (_showRetryButton && _allDoctors.isEmpty)
             SliverFillRemaining(
               hasScrollBody: false,
-              child: Center(
-                child: Semantics(
-                  label: 'جارٍ التحميل',
-                  child: const CircularProgressIndicator(),
-                ),
-              ),
+              child: _buildOfflineRetryView(),
             )
           else if (_errorMessage != null)
             SliverToBoxAdapter(
@@ -1609,7 +1888,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                   children: <Widget>[
                     Text(
                       _errorMessage!,
-                      style: const TextStyle(color: Color(0xFFB00020)),
+                      style: TextStyle(color: Theme.of(context).colorScheme.error),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 12),
@@ -1653,8 +1932,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             ),
         ],
       ),
+          ), // RefreshIndicator
           _buildFavoritesTabContent(),
-          const MyClinicScreen(),
+          if (isAdmin)
+            const MyClinicScreen()
+          else
+            const SizedBox.shrink(),
         ],
       ),
     );
@@ -1682,12 +1965,12 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               'جرّب تعديل الكلمات أو إزالة بعض الفلاتر.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 14,
-                color: Color(0xFF718096),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
                 height: 1.35,
               ),
             ),
@@ -1727,24 +2010,25 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   Widget _buildFavoritesTabContent() {
+    const Color primaryMedicalBlue = Color(0xFF42A5F5);
+    Widget body;
     if (_isLoading) {
-      return const Center(
+      body = const Center(
         child: CircularProgressIndicator(),
       );
-    }
-    if (_errorMessage != null) {
-      return Center(
+    } else if (_errorMessage != null) {
+      body = Center(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Text(
             _errorMessage!,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: Color(0xFFB00020)),
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
           ),
         ),
       );
-    }
-    return Consumer<FavoritesProvider>(
+    } else {
+      body = Consumer<FavoritesProvider>(
       builder: (BuildContext context, FavoritesProvider fav, _) {
         if (fav.orderedFavoriteIds.isEmpty) {
           return ListView(
@@ -1821,6 +2105,31 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         );
       },
     );
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7FBFF),
+      appBar: AppBar(
+        backgroundColor: primaryMedicalBlue,
+        foregroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        centerTitle: true,
+        automaticallyImplyLeading: false,
+        title: Text(
+          'أطبائي',
+          style: GoogleFonts.cairo(fontWeight: FontWeight.w700),
+        ),
+        actions: <Widget>[
+          if (Supabase.instance.client.auth.currentSession != null)
+            IconButton(
+              tooltip: 'تسجيل الخروج',
+              onPressed: _signOutFromHome,
+              icon: const Icon(Icons.logout_outlined),
+            ),
+        ],
+      ),
+      body: body,
+    );
   }
 
   /// فلاتر المحافظة/المنطقة فقط (البحث النصي من أيقونة المكبّر في [SliverAppBar]).
@@ -1828,7 +2137,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(14),
         boxShadow: <BoxShadow>[
           BoxShadow(
@@ -1855,6 +2164,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                 setState(() {
                   _selectedGovernorate = value;
                 });
+                CrashlyticsService.instance
+                    .setScreen('home_${_selectedGovernorate ?? 'البصرة'}');
                 _loadDoctors();
               },
             ),
@@ -1947,7 +2258,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     return Container(
       padding: const EdgeInsetsDirectional.fromSTEB(8, 6, 8, 6),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(14),
         boxShadow: <BoxShadow>[
           BoxShadow(
@@ -2030,6 +2341,51 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     );
   }
 
+  /// Trust-layer badge: green pill that surfaces the verification date when known.
+  Widget _buildVerifiedBadge(DateTime? verificationDate) {
+    String tooltip = 'حساب موثّق';
+    if (verificationDate != null) {
+      tooltip = 'موثّق منذ '
+          '${verificationDate.day}/${verificationDate.month}/${verificationDate.year}';
+    }
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: const Color(0xFFE8F5E9),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFF66BB6A)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: const <Widget>[
+            Icon(Icons.verified_rounded, size: 14, color: Color(0xFF2E7D32)),
+            SizedBox(width: 3),
+            Text(
+              'موثّق',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF2E7D32),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Friendly Arabic relative-time label, e.g. "تحديث: قبل 5 د".
+  String _formatLastStatusUpdate(DateTime when) {
+    final Duration delta = DateTime.now().difference(when);
+    if (delta.inMinutes < 1) return 'تحديث: الآن';
+    if (delta.inMinutes < 60) return 'تحديث: قبل ${delta.inMinutes} د';
+    if (delta.inHours < 24) return 'تحديث: قبل ${delta.inHours} س';
+    if (delta.inDays < 7)   return 'تحديث: قبل ${delta.inDays} يوم';
+    return 'تحديث: ${when.day}/${when.month}/${when.year}';
+  }
+
   Widget _buildClinicCard(Doctor doctor) {
     const Color chipTeal = Color(0xFF006064);
     const Color chipBg = Color(0xFFE0F7FA);
@@ -2039,7 +2395,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       child: Material(
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         elevation: 2,
         shadowColor: const Color(0x22000000),
         borderRadius: BorderRadius.circular(12),
@@ -2061,12 +2417,21 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
                           Expanded(
-                            child: Text(
-                              doctor.name,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w800,
-                              ),
+                            child: Wrap(
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: <Widget>[
+                                Text(
+                                  doctor.name,
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                                if (doctor.isVerified)
+                                  _buildVerifiedBadge(doctor.verificationDate),
+                              ],
                             ),
                           ),
                           Consumer<FavoritesProvider>(
@@ -2133,12 +2498,23 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                           Expanded(
                             child: Text(
                               doctor.area,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 13,
-                                color: Color(0xFF718096),
+                                color: Theme.of(context).colorScheme.onSurfaceVariant,
                               ),
                             ),
                           ),
+                          if (doctor.lastStatusUpdate != null)
+                            Padding(
+                              padding: const EdgeInsetsDirectional.only(start: 6),
+                              child: Text(
+                                _formatLastStatusUpdate(doctor.lastStatusUpdate!),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Color(0xFF90A4AE),
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                       const SizedBox(height: 2),
@@ -2174,38 +2550,32 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                                   maximumSize: const Size(40, 40),
                                 ),
                               ),
-                              IconButton(
-                                onPressed: (doctor.hasCoordinates || doctor.addr.trim().isNotEmpty)
-                                    ? () {
-                                        if (doctor.hasCoordinates) {
-                                          unawaited(_openGoogleMapsLatLng(
-                                            doctor.latitude!,
-                                            doctor.longitude!,
-                                            locationDetail: doctor.name,
-                                          ));
-                                        } else {
-                                          _openMap(
-                                            doctor.addr,
-                                            locationDetail: doctor.name,
-                                          );
-                                        }
-                                      }
-                                    : null,
-                                icon: Icon(
-                                  Icons.add_location_alt_rounded,
-                                  size: 20,
-                                  color: Colors.blue.shade700,
+                              if (sessionUserIsAdmin(Supabase
+                                      .instance.client.auth.currentUser) &&
+                                  doctor.hasCoordinates)
+                                IconButton(
+                                  onPressed: () {
+                                    unawaited(_openGoogleMapsLatLng(
+                                      doctor.latitude!,
+                                      doctor.longitude!,
+                                      locationDetail: doctor.name,
+                                    ));
+                                  },
+                                  icon: Icon(
+                                    Icons.add_location_alt_rounded,
+                                    size: 20,
+                                    color: Colors.blue.shade700,
+                                  ),
+                                  tooltip: 'الموقع على الخريطة',
+                                  padding: EdgeInsets.zero,
+                                  visualDensity: VisualDensity.compact,
+                                  style: IconButton.styleFrom(
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                    minimumSize: const Size(36, 36),
+                                    maximumSize: const Size(40, 40),
+                                  ),
                                 ),
-                                tooltip: 'الموقع على الخريطة',
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                style: IconButton.styleFrom(
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  minimumSize: const Size(36, 36),
-                                  maximumSize: const Size(40, 40),
-                                ),
-                              ),
                               IconButton(
                                 onPressed: primaryPhone.isEmpty
                                     ? null
@@ -2305,14 +2675,17 @@ class _ReportDoctorSheetState extends State<_ReportDoctorSheet> {
   }
 
   Future<void> _load() async {
-    final EditSuggestionSchemaBundle b = await _schemaService.loadBundle();
-    if (!mounted) {
-      return;
+    try {
+      final EditSuggestionSchemaBundle b = await _schemaService.loadBundle();
+      if (!mounted) return;
+      setState(() {
+        _bundle = b;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loading = false);
     }
-    setState(() {
-      _bundle = b;
-      _loading = false;
-    });
   }
 
   @override
@@ -2343,11 +2716,11 @@ class _ReportDoctorSheetState extends State<_ReportDoctorSheet> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   'اقترح تصحيح المعلومات الظاهرة فقط (رقم، عنوان، موقع على الخريطة).',
                   style: TextStyle(
                     fontSize: 12,
-                    color: Color(0xFF718096),
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                     height: 1.3,
                   ),
                 ),
@@ -2403,8 +2776,9 @@ class _AddClinicPageState extends State<AddClinicPage> {
   );
 
   final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _physicianCustomSpecController = TextEditingController();
-  final TextEditingController _imagingCustomController = TextEditingController();
+  /// يُحدَّث من [MedicalCategorySelector]؛ لا تعتمد على [GlobalKey] لأن الخطوة ٢ تُزال من الشجرة بعد التقدّم.
+  String _medicalStoredSpec = '';
+  int? _selectedSpecializationId;
   final TextEditingController _areaOtherGovernorateController = TextEditingController();
   final TextEditingController _basraCustomAreaController = TextEditingController();
   final TextEditingController _addressController = TextEditingController();
@@ -2413,11 +2787,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
   final TextEditingController _notesController = TextEditingController();
 
   int _currentStep = 0;
-  _MedicalFieldType? _medicalType;
-  String? _selectedPhysicianSpec;
-  String? _selectedImagingType;
-  bool _physicianUseCustom = false;
-  bool _imagingUseCustom = false;
   String _governorate = kGovernorates.first;
   String? _selectedBasraArea;
   bool _basraUseCustomArea = false;
@@ -2428,8 +2797,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
   @override
   void dispose() {
     _nameController.dispose();
-    _physicianCustomSpecController.dispose();
-    _imagingCustomController.dispose();
     _areaOtherGovernorateController.dispose();
     _basraCustomAreaController.dispose();
     _addressController.dispose();
@@ -2439,30 +2806,8 @@ class _AddClinicPageState extends State<AddClinicPage> {
     super.dispose();
   }
 
-  String _buildSpecForSubmit() {
-    final _MedicalFieldType? t = _medicalType;
-    if (t == null) {
-      return '';
-    }
-    switch (t) {
-      case _MedicalFieldType.physician:
-        if (_physicianUseCustom) {
-          return _physicianCustomSpecController.text.trim();
-        }
-        return _selectedPhysicianSpec ?? '';
-      case _MedicalFieldType.radiology:
-        if (_imagingUseCustom) {
-          return _imagingCustomController.text.trim();
-        }
-        return _selectedImagingType ?? '';
-      case _MedicalFieldType.dentist:
-        return kSpecDentistry;
-      case _MedicalFieldType.pharmacy:
-        return kSpecPharmacy;
-      case _MedicalFieldType.lab:
-        return kSpecLaboratory;
-    }
-  }
+  String _buildSpecForSubmit() =>
+      MedicalCategorySnapshot.fromStoredSpec(_medicalStoredSpec).toStoredSpec();
 
   String _buildAreaForSubmit() {
     if (_governorate == 'البصرة') {
@@ -2481,26 +2826,8 @@ class _AddClinicPageState extends State<AddClinicPage> {
   }
 
   bool _validateStep1() {
-    if (_medicalType == null) {
-      return false;
-    }
-    if (_medicalType == _MedicalFieldType.physician) {
-      if (_physicianUseCustom) {
-        return _physicianCustomSpecController.text.trim().length >= 2;
-      }
-      return _selectedPhysicianSpec != null &&
-          _selectedPhysicianSpec != kDropdownAddCustom &&
-          _selectedPhysicianSpec!.isNotEmpty;
-    }
-    if (_medicalType == _MedicalFieldType.radiology) {
-      if (_imagingUseCustom) {
-        return _imagingCustomController.text.trim().length >= 2;
-      }
-      return _selectedImagingType != null &&
-          _selectedImagingType != kDropdownAddCustom &&
-          _selectedImagingType!.isNotEmpty;
-    }
-    return true;
+    return MedicalCategorySnapshot.fromStoredSpec(_medicalStoredSpec)
+        .validateBeforeEncode();
   }
 
   bool _validateStep2() {
@@ -2512,7 +2839,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
         return _basraCustomAreaController.text.trim().length >= 2;
       }
       return _selectedBasraArea != null &&
-          _selectedBasraArea != kDropdownAddCustom &&
+          _selectedBasraArea != kFormDropdownCustomSentinel &&
           _selectedBasraArea!.isNotEmpty;
     }
     return _areaOtherGovernorateController.text.trim().length >= 2;
@@ -2520,15 +2847,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
 
   /// تحقق يدوي لجدول kSupabasePendingDoctorsTable بدون الاعتماد فقط على
   /// FormState للخطوات 1-2.
-  bool _validateStep1CustomTextIfNeeded() {
-    if (_medicalType == _MedicalFieldType.physician && _physicianUseCustom) {
-      return _physicianCustomSpecController.text.trim().length >= 2;
-    }
-    if (_medicalType == _MedicalFieldType.radiology && _imagingUseCustom) {
-      return _imagingCustomController.text.trim().length >= 2;
-    }
-    return true;
-  }
+  bool _validateStep1CustomTextIfNeeded() => true;
 
   bool _validateStep2CustomTextIfNeeded() {
     if (_governorate == 'البصرة' && _basraUseCustomArea) {
@@ -2614,7 +2933,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                'يجب تحديد موقع العيادة على خرائط Google من هذه الخطوة.',
+                'يجب تحديد موقع العيادة على الخريطة من هذه الخطوة.',
               ),
             ),
           );
@@ -2646,7 +2965,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'يجب تحديد موقع العيادة على خرائط Google (الخطوة ٣) قبل الإرسال.',
+              'يجب تحديد موقع العيادة على الخريطة (الخطوة ٣) قبل الإرسال.',
             ),
           ),
         );
@@ -2683,6 +3002,8 @@ class _AddClinicPageState extends State<AddClinicPage> {
         'ph2': ph2Text,
         'notes': notes,
         'gove': _governorate,
+        if (_selectedSpecializationId != null)
+          'specialization_id': _selectedSpecializationId,
         ...DoctorCoordinates.supabasePair(
           latitude: _pickedLatitude,
           longitude: _pickedLongitude,
@@ -2714,8 +3035,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
 
   void _resetForm() {
     _nameController.clear();
-    _physicianCustomSpecController.clear();
-    _imagingCustomController.clear();
     _areaOtherGovernorateController.clear();
     _basraCustomAreaController.clear();
     _addressController.clear();
@@ -2724,16 +3043,12 @@ class _AddClinicPageState extends State<AddClinicPage> {
     _notesController.clear();
     setState(() {
       _currentStep = 0;
-      _medicalType = null;
-      _selectedPhysicianSpec = null;
-      _selectedImagingType = null;
-      _physicianUseCustom = false;
-      _imagingUseCustom = false;
       _governorate = kGovernorates.first;
       _selectedBasraArea = null;
       _basraUseCustomArea = false;
       _pickedLatitude = null;
       _pickedLongitude = null;
+      _medicalStoredSpec = '';
     });
   }
 
@@ -2927,183 +3242,23 @@ class _AddClinicPageState extends State<AddClinicPage> {
             style: TextStyle(color: Color(0xFF718096), fontSize: 14),
           ),
           const SizedBox(height: 12),
-          ...<Widget>[
-            _medicalSelectTile('طبيب', _MedicalFieldType.physician),
-            _medicalSelectTile('اشعة وسونار', _MedicalFieldType.radiology),
-            _medicalSelectTile('طبيب أسنان', _MedicalFieldType.dentist),
-            _medicalSelectTile('صيدلية', _MedicalFieldType.pharmacy),
-            _medicalSelectTile('مختبر', _MedicalFieldType.lab),
-          ],
-          const SizedBox(height: 12),
-          if (_medicalType == _MedicalFieldType.physician) _physicianSpecSection(),
-          if (_medicalType == _MedicalFieldType.radiology) _imagingSection(),
+          MedicalCategorySelector(
+            initialStoredSpec: _medicalStoredSpec,
+            initialSpecializationId: _selectedSpecializationId,
+            showIntroLabels: false,
+            tileRadius: 12,
+            decorateDropdownField: _inputDecoration,
+            onComposedStoredSpecChanged: (String s) {
+              if (_medicalStoredSpec == s) {
+                return;
+              }
+              setState(() => _medicalStoredSpec = s);
+            },
+            onSpecializationIdChanged: (int? id) =>
+                _selectedSpecializationId = id,
+          ),
         ],
       ),
-    );
-  }
-
-  Widget _medicalSelectTile(String title, _MedicalFieldType value) {
-    final bool selected = _medicalType == value;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: Material(
-        color: selected
-            ? const Color(0xFFE3F2FD)
-            : const Color(0xFFF7FAFC),
-        borderRadius: BorderRadius.circular(12),
-        child: ListTile(
-          onTap: () {
-            setState(() {
-              _medicalType = value;
-              _selectedPhysicianSpec = null;
-              _selectedImagingType = null;
-              _physicianUseCustom = false;
-              _imagingUseCustom = false;
-            });
-          },
-          leading: Icon(
-            selected
-                ? Icons.radio_button_checked_rounded
-                : Icons.radio_button_off_rounded,
-            color: selected ? const Color(0xFF1976D2) : const Color(0xFF94A3B8),
-          ),
-          title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-        ),
-      ),
-    );
-  }
-
-  Widget _physicianSpecSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        const SizedBox(height: 4),
-        const Text('التخصص *', style: TextStyle(fontWeight: FontWeight.w600)),
-        const SizedBox(height: 6),
-        DropdownButtonFormField<String>(
-          key: ValueKey<String>(
-              'phys_${_physicianUseCustom}_$_selectedPhysicianSpec'),
-          initialValue: _physicianUseCustom
-              ? kDropdownAddCustom
-              : _selectedPhysicianSpec,
-          isExpanded: true,
-          decoration: _inputDecoration('اختر التخصص'),
-          items: <DropdownMenuItem<String>>[
-            ...kPhysicianSpecializations.map(
-              (String s) => DropdownMenuItem<String>(
-                value: s,
-                child: Text(
-                  s,
-                  overflow: TextOverflow.ellipsis,
-                  softWrap: false,
-                ),
-              ),
-            ),
-            const DropdownMenuItem<String>(
-              value: kDropdownAddCustom,
-              child: Text('إضافة تخصص جديد'),
-            ),
-          ],
-          onChanged: (String? v) {
-            if (v == null) {
-              return;
-            }
-            setState(() {
-              if (v == kDropdownAddCustom) {
-                _physicianUseCustom = true;
-                _selectedPhysicianSpec = kDropdownAddCustom;
-              } else {
-                _physicianUseCustom = false;
-                _selectedPhysicianSpec = v;
-              }
-            });
-          },
-        ),
-        if (_physicianUseCustom) ...<Widget>[
-          const SizedBox(height: 10),
-          TextFormField(
-            controller: _physicianCustomSpecController,
-            decoration: _inputDecoration('اكتب التخصص الجديد *'),
-            onChanged: (_) => setState(() {}),
-            validator: (String? v) {
-              if (!_physicianUseCustom) {
-                return null;
-              }
-              if (v == null || v.trim().length < 2) {
-                return 'مطلوب';
-              }
-              return null;
-            },
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _imagingSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        const SizedBox(height: 4),
-        const Text('نوع الاشعة *', style: TextStyle(fontWeight: FontWeight.w600)),
-        const SizedBox(height: 6),
-        DropdownButtonFormField<String>(
-          key: ValueKey<String>(
-              'img_${_imagingUseCustom}_$_selectedImagingType'),
-          initialValue: _imagingUseCustom
-              ? kDropdownAddCustom
-              : _selectedImagingType,
-          isExpanded: true,
-          decoration: _inputDecoration('اختر النوع'),
-          items: <DropdownMenuItem<String>>[
-            ...kImagingModalityOptions.map(
-              (String s) => DropdownMenuItem<String>(
-                value: s,
-                child: Text(
-                  s,
-                  overflow: TextOverflow.ellipsis,
-                  softWrap: false,
-                ),
-              ),
-            ),
-            const DropdownMenuItem<String>(
-              value: kDropdownAddCustom,
-              child: Text('إضافة نوع جديد'),
-            ),
-          ],
-          onChanged: (String? v) {
-            if (v == null) {
-              return;
-            }
-            setState(() {
-              if (v == kDropdownAddCustom) {
-                _imagingUseCustom = true;
-                _selectedImagingType = kDropdownAddCustom;
-              } else {
-                _imagingUseCustom = false;
-                _selectedImagingType = v;
-              }
-            });
-          },
-        ),
-        if (_imagingUseCustom) ...<Widget>[
-          const SizedBox(height: 10),
-          TextFormField(
-            controller: _imagingCustomController,
-            decoration: _inputDecoration('اكتب النوع الجديد *'),
-            onChanged: (_) => setState(() {}),
-            validator: (String? v) {
-              if (!_imagingUseCustom) {
-                return null;
-              }
-              if (v == null || v.trim().length < 2) {
-                return 'مطلوب';
-              }
-              return null;
-            },
-          ),
-        ],
-      ],
     );
   }
 
@@ -3168,7 +3323,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
           key: ValueKey<String>(
               'bs_${_basraUseCustomArea}_$_selectedBasraArea'),
           initialValue:
-              _basraUseCustomArea ? kDropdownAddCustom : _selectedBasraArea,
+              _basraUseCustomArea ? kFormDropdownCustomSentinel : _selectedBasraArea,
           isExpanded: true,
           decoration: _inputDecoration('اختر المنطقة'),
           items: <DropdownMenuItem<String>>[
@@ -3176,7 +3331,7 @@ class _AddClinicPageState extends State<AddClinicPage> {
               (String a) => DropdownMenuItem<String>(value: a, child: Text(a)),
             ),
             const DropdownMenuItem<String>(
-              value: kDropdownAddCustom,
+              value: kFormDropdownCustomSentinel,
               child: Text('إضافة منطقة جديدة'),
             ),
           ],
@@ -3185,9 +3340,9 @@ class _AddClinicPageState extends State<AddClinicPage> {
               return;
             }
             setState(() {
-              if (v == kDropdownAddCustom) {
+              if (v == kFormDropdownCustomSentinel) {
                 _basraUseCustomArea = true;
-                _selectedBasraArea = kDropdownAddCustom;
+                _selectedBasraArea = kFormDropdownCustomSentinel;
               } else {
                 _basraUseCustomArea = false;
                 _selectedBasraArea = v;
@@ -3508,2161 +3663,6 @@ class _ReportPageState extends State<ReportPage> {
         ),
       ),
     );
-  }
-}
-
-enum _DuplicateApprovalChoice { cancel, deleteRequest, updateExisting }
-
-class AdminDashboardPage extends StatefulWidget {
-  const AdminDashboardPage({super.key, this.autoAuthenticated = false});
-
-  /// `true` عند فتح المسار بـ [Navigator.pushNamed] مع `arguments: true` (بعد التحقق من الرئيسية).
-  final bool autoAuthenticated;
-
-  @override
-  State<AdminDashboardPage> createState() => _AdminDashboardPageState();
-}
-
-class _AdminDashboardPageState extends State<AdminDashboardPage> {
-  final SupabaseClient _supabase = Supabase.instance.client;
-  final EditSuggestionSchemaService _reportSchemaService =
-      EditSuggestionSchemaService(Supabase.instance.client);
-  EditSuggestionSchemaBundle? _reportSchemaBundle;
-  final TextEditingController _passwordController = TextEditingController();
-  final TextEditingController _doctorSearchController = TextEditingController();
-  late bool _authenticated;
-  bool _isLoading = false;
-  List<Map<String, dynamic>> _pendingDoctors = <Map<String, dynamic>>[];
-  List<Map<String, dynamic>> _clinicClaimRequests = <Map<String, dynamic>>[];
-  /// يُملأ من جدول التقارير الذي يحدّده RPC [app_edit_suggestion_schema_bundle].
-  List<Map<String, dynamic>> _reportRows = <Map<String, dynamic>>[];
-  List<Map<String, dynamic>> _searchedDoctors = <Map<String, dynamic>>[];
-  bool _isSearchingDoctors = false;
-  bool _doctorSearchPerformed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _authenticated = widget.autoAuthenticated;
-    if (_authenticated) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _loadDashboardData();
-        }
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _passwordController.dispose();
-    _doctorSearchController.dispose();
-    super.dispose();
-  }
-
-  String _adminReportsTable() {
-    final EditSuggestionSchemaBundle? b = _reportSchemaBundle;
-    if (b != null && b.ok && b.reportsTable.isNotEmpty) {
-      return b.reportsTable;
-    }
-    return kSupabaseReportsTable;
-  }
-
-  String _adminDoctorsEntityTable() {
-    final EditSuggestionTarget? t = _reportSchemaBundle?.primaryTarget;
-    if (t != null && t.refTable.isNotEmpty) {
-      return t.refTable;
-    }
-    return kSupabaseDoctorsTable;
-  }
-
-  String _adminReportFkColumn() {
-    final String? c = _reportSchemaBundle?.primaryTarget?.fkColumn;
-    if (c != null && c.isNotEmpty) {
-      return c;
-    }
-    return 'doctor_id';
-  }
-
-  int? _adminReportTargetId(Map<String, dynamic> r) {
-    return int.tryParse(
-      (r[_adminReportFkColumn()] ?? r['doctor_id'] ?? '').toString(),
-    );
-  }
-
-  SchemaColumn? _schemaColumnByName(String name) {
-    final List<SchemaColumn>? list =
-        _reportSchemaBundle?.primaryTarget?.refColumns;
-    if (list == null) {
-      return null;
-    }
-    for (final SchemaColumn c in list) {
-      if (c.columnName == name) {
-        return c;
-      }
-    }
-    return null;
-  }
-
-  /// ربط لوحة الأدمن بجدول [kSupabasePendingDoctorsTable] و [kSupabaseReportsTable].
-  Future<void> _loadDashboardData() async {
-    setState(() {
-      _isLoading = true;
-    });
-    final EditSuggestionSchemaBundle schemaBundle =
-        await _reportSchemaService.loadBundle();
-    List<Map<String, dynamic>> nextPending = <Map<String, dynamic>>[];
-    List<Map<String, dynamic>> nextClinicClaims = <Map<String, dynamic>>[];
-    List<Map<String, dynamic>> nextReports = <Map<String, dynamic>>[];
-    try {
-      final List<dynamic> pending = await _supabase
-          .from(kSupabasePendingDoctorsTable)
-          .select()
-          .order('id');
-      nextPending = pending.cast<Map<String, dynamic>>();
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('تعذر جلب طلبات العيادات: $error'),
-          ),
-        );
-      }
-    }
-    try {
-      final List<dynamic> claims = await _supabase
-          .from(kSupabaseClinicClaimRequestsTable)
-          .select('id, doctor_id, user_id, clinic_name, status, created_at')
-          .eq('status', 'pending')
-          .order('created_at', ascending: false)
-          .limit(200);
-      nextClinicClaims = claims.cast<Map<String, dynamic>>();
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('تعذر جلب طلبات استحواذ العيادات: $error'),
-          ),
-        );
-      }
-    }
-    try {
-      final String repTable =
-          schemaBundle.ok ? schemaBundle.reportsTable : kSupabaseReportsTable;
-      final List<dynamic> reports = await _supabase
-          .from(repTable)
-          .select()
-          .eq('status', kReportStatusPending)
-          .order('created_at', ascending: false)
-          .limit(200);
-      nextReports = reports.cast<Map<String, dynamic>>();
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('تعذر جلب اقتراحات التعديل: $error'),
-          ),
-        );
-      }
-    }
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _pendingDoctors = nextPending;
-      _clinicClaimRequests = nextClinicClaims;
-      _reportRows = nextReports;
-      _reportSchemaBundle = schemaBundle;
-      _isLoading = false;
-    });
-  }
-
-  Future<void> _approveRequest(Map<String, dynamic> request) async {
-    const List<String> kDoctorCols = <String>[
-      'name', 'spec', 'addr', 'area', 'ph', 'notes', 'gove',
-    ];
-    final Map<String, dynamic> payload = <String, dynamic>{
-      for (final String k in kDoctorCols) k: request[k],
-      'ph2': (request['ph2'] ?? '').toString(),
-    };
-    final double? reqLat = DoctorCoordinates.readLatitude(request);
-    final double? reqLng = DoctorCoordinates.readLongitude(request);
-    if (reqLat == null || reqLng == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'لا يمكن الموافقة: الطلب يجب أن يتضمّن موقعاً محدداً على خرائط Google (خطوة الإحداثيات).',
-            ),
-          ),
-        );
-      }
-      return;
-    }
-    payload['latitude'] = reqLat;
-    payload['longitude'] = reqLng;
-    final String addrVal = (payload['addr'] ?? '').toString().trim();
-    if (addrVal.startsWith('http://') || addrVal.startsWith('https://')) {
-      payload['addr'] = '—';
-    }
-
-    // قيد فريد على (name, spec, gove). نتحقّق مسبقاً ونعرض خيارات
-    // واضحة بدل ما يفشل الـ INSERT برسالة قاعدة بيانات غير مفهومة.
-    final String reqName = (request['name'] ?? '').toString().trim();
-    final String reqSpec = (request['spec'] ?? '').toString().trim();
-    final String reqGove = (request['gove'] ?? '').toString().trim();
-    Map<String, dynamic>? duplicate;
-    try {
-      final List<dynamic> existing = await _supabase
-          .from(kSupabaseDoctorsTable)
-          .select('id, name, spec, gove')
-          .eq('name', reqName)
-          .eq('spec', reqSpec)
-          .eq('gove', reqGove)
-          .limit(1);
-      if (existing.isNotEmpty) {
-        duplicate = existing.first as Map<String, dynamic>;
-      }
-    } catch (_) {
-      // إذا فشل التحقق نكمل ونعتمد على رسالة الخطأ من INSERT.
-    }
-
-    if (duplicate != null) {
-      final _DuplicateApprovalChoice? choice =
-          await _askDuplicateApprovalChoice(reqName);
-      if (choice == null || choice == _DuplicateApprovalChoice.cancel) {
-        return;
-      }
-      if (choice == _DuplicateApprovalChoice.deleteRequest) {
-        await _rejectRequest(request);
-        return;
-      }
-      if (choice == _DuplicateApprovalChoice.updateExisting) {
-        try {
-          await _supabase
-              .from(kSupabaseDoctorsTable)
-              .update(payload)
-              .eq('id', duplicate['id']);
-          await _supabase
-              .from(kSupabasePendingDoctorsTable)
-              .delete()
-              .eq('id', request['id']);
-          if (!mounted) {
-            return;
-          }
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('تم تحديث بيانات العيادة الموجودة من بيانات الطلب.'),
-            ),
-          );
-          await _loadDashboardData();
-        } catch (error) {
-          if (!mounted) {
-            return;
-          }
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('فشل تحديث العيادة: $error')),
-          );
-        }
-        return;
-      }
-    }
-
-    try {
-      await _supabase.from(kSupabaseDoctorsTable).insert(payload);
-      await _supabase
-          .from(kSupabasePendingDoctorsTable)
-          .delete()
-          .eq('id', request['id']);
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تمت الموافقة وإضافة العيادة إلى القائمة.')),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      final String message = _humanReadableApprovalError(error);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
-    }
-  }
-
-  Future<_DuplicateApprovalChoice?> _askDuplicateApprovalChoice(
-    String name,
-  ) {
-    return showDialog<_DuplicateApprovalChoice>(
-      context: context,
-      builder: (BuildContext ctx) {
-        return AlertDialog(
-          title: const Text('عيادة مكررة'),
-          content: Text(
-            'يوجد مسبقاً عيادة بنفس الاسم والاختصاص والمحافظة:\n«$name».\n\n'
-            'ماذا تريد أن تفعل؟',
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () =>
-                  Navigator.of(ctx).pop(_DuplicateApprovalChoice.cancel),
-              child: const Text('إلغاء'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx)
-                  .pop(_DuplicateApprovalChoice.deleteRequest),
-              child: const Text('حذف الطلب فقط'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx)
-                  .pop(_DuplicateApprovalChoice.updateExisting),
-              child: const Text('تحديث الموجودة'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  String _humanReadableApprovalError(Object error) {
-    final String text = error.toString();
-    if (text.contains('doctors_unique') ||
-        text.contains('duplicate key') ||
-        text.contains('23505')) {
-      return 'العيادة موجودة مسبقاً (نفس الاسم/الاختصاص/المحافظة). جرّب «تحديث الموجودة» أو «حذف الطلب».';
-    }
-    if (text.contains('row-level security') ||
-        text.contains('permission denied')) {
-      return 'لا توجد صلاحيات كافية على قاعدة البيانات لإتمام الموافقة.';
-    }
-    return 'فشلت الموافقة: $error';
-  }
-
-  Future<void> _rejectRequest(Map<String, dynamic> request) async {
-    try {
-      await _supabase
-          .from(kSupabasePendingDoctorsTable)
-          .delete()
-          .eq('id', request['id']);
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم رفض الطلب وحذفه من الانتظار.')),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تعذر الحذف: $error')),
-      );
-    }
-  }
-
-  String _fieldForIssueType(String? type) {
-    switch (type) {
-      case 'wrong_phone':
-        return 'ph';
-      case 'wrong_address':
-        return 'addr';
-      case 'wrong_name_or_spec':
-        return 'name';
-      default:
-        return 'notes';
-    }
-  }
-
-  /// يحسب عدد الاقتراحات المعلّقة للطبيب ويزامن [kSupabaseReportTotalsTable].
-  /// لا يرمي exception — المزامنة ثانوية ولا تعيق العملية الرئيسية.
-  Future<void> _syncReportTotal(int docId) async {
-    try {
-      final String fk = _adminReportFkColumn();
-      final List<dynamic> pending = await _supabase
-          .from(_adminReportsTable())
-          .select('id')
-          .eq(fk, docId)
-          .eq('status', kReportStatusPending);
-      await _supabase.from(kSupabaseReportTotalsTable).upsert(
-        <String, dynamic>{
-          'doctor_id': docId,
-          'report_count': pending.length,
-        },
-        onConflict: 'doctor_id',
-      );
-    } catch (e) {
-      debugPrint('_syncReportTotal failed for docId=$docId: $e');
-    }
-  }
-
-  /// حذف فعلي لصف الاقتراح من [kSupabaseReportsTable] بعد تأكيد المستخدم.
-  Future<void> _deleteReport(Map<String, dynamic> r) async {
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
-        title: const Text('تأكيد حذف الاقتراح'),
-        content: const Text(
-          'هل تريد حذف هذا الاقتراح نهائياً؟ لا يمكن التراجع.',
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('إلغاء'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('حذف'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) {
-      return;
-    }
-    final int? docId = _adminReportTargetId(r);
-    try {
-      await _supabase
-          .from(_adminReportsTable())
-          .delete()
-          .eq('id', r['id']);
-      if (docId != null) {
-        await _syncReportTotal(docId);
-      }
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم حذف الاقتراح.')),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشل الحذف: $error')),
-      );
-    }
-  }
-
-  /// موافقة سريعة: تطبيق «suggested_correction» تلقائياً على العمود المستهدف
-  /// بلا حوار، مع التحقق من كون العمود ضمن الحقول التي يُسمح للـ anon بتحديثها.
-  /// يستخدم تدفق الخرائط إذا كان الاقتراح إحداثيات.
-  Future<void> _approveReport(Map<String, dynamic> r) async {
-    final int? docId = _adminReportTargetId(r);
-    if (docId == null) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('لا يمكن تحديد الطبيب المستهدف لهذا الاقتراح.'),
-        ),
-      );
-      return;
-    }
-
-    // اقتراح موقع: نستخدم تدفق الخرائط الموجود (يستخدم suggested_latitude/longitude).
-    if (r['info_issue_type']?.toString() == 'wrong_map_location') {
-      final double? la = DoctorCoordinates.readSuggestedLatitude(r);
-      final double? ln = DoctorCoordinates.readSuggestedLongitude(r);
-      if (la != null && ln != null) {
-        await _commitMapLocationApproval(r, docId, la, ln);
-        return;
-      }
-      await _applyMapLocationFromReport(r, docId);
-      return;
-    }
-
-    // اقتراح نصي/رقمي: نطبّق suggested_correction على العمود المستهدف مباشرة.
-    final String? rawField = resolveReportTargetColumn(r);
-    final String? field = rawField?.isNotEmpty == true
-        ? rawField
-        : _fieldForIssueType(r['info_issue_type']?.toString());
-    if (field == null || field.isEmpty) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('لا يمكن تحديد الحقل المراد تعديله. استخدم «تعديل يدوي».'),
-        ),
-      );
-      return;
-    }
-    if (!kAdminUpdatableDoctorColumns.contains(field)) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'الحقل «$field» غير مسموح بتحديثه من لوحة الأدمن. '
-            'استخدم «تعديل يدوي» أو وسّع صلاحيات anon.',
-          ),
-        ),
-      );
-      return;
-    }
-    final String newValue = (r['suggested_correction'] ?? '').toString().trim();
-    if (newValue.isEmpty) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('الاقتراح لا يتضمّن قيمة جديدة. استخدم «تعديل يدوي».'),
-        ),
-      );
-      return;
-    }
-    await _commitCorrection(r, docId, field, newValue);
-  }
-
-  /// يطبّق الإحداثيات المقترحة على جدول الأطباء ويضع حالة الاقتراح resolved.
-  Future<void> _commitMapLocationApproval(
-    Map<String, dynamic> r,
-    int docId,
-    double la,
-    double ln,
-  ) async {
-    try {
-      final List<dynamic> doctorUpdated = await _supabase
-          .from(_adminDoctorsEntityTable())
-          .update(<String, dynamic>{
-            'latitude': la,
-            'longitude': ln,
-          })
-          .eq('id', docId)
-          .select('id');
-      if (doctorUpdated.isEmpty) {
-        throw Exception('لم يتم تحديث بيانات الطبيب المستهدف.');
-      }
-      final List<dynamic> reportUpdated = await _supabase
-          .from(_adminReportsTable())
-          .update(<String, dynamic>{
-            'status': kReportStatusResolved,
-          })
-          .eq('id', r['id'])
-          .eq('status', kReportStatusPending)
-          .select('id');
-      if (reportUpdated.isEmpty) {
-        throw Exception('لم تتغير حالة الاقتراح (قد يكون عولج مسبقاً أو لا توجد صلاحية).');
-      }
-      await _syncReportTotal(docId);
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('تمت الموافقة وتحديث موقع العيادة.'),
-        ),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشلت الموافقة على الموقع: $error')),
-      );
-    }
-  }
-
-  Future<void> _applyMapLocationFromReport(
-    Map<String, dynamic> r,
-    int docId,
-  ) async {
-    double initLa = 30.5039;
-    double initLo = 47.7806;
-    try {
-      final List<dynamic> res = await _supabase
-          .from(_adminDoctorsEntityTable())
-          .select('latitude, longitude')
-          .eq('id', docId)
-          .limit(1);
-      if (res.isNotEmpty) {
-        final Map<String, dynamic> d = res.first as Map<String, dynamic>;
-        initLa = DoctorCoordinates.readLatitude(d) ?? initLa;
-        initLo = DoctorCoordinates.readLongitude(d) ?? initLo;
-      }
-    } catch (_) {}
-    final double? sugLa = DoctorCoordinates.readSuggestedLatitude(r);
-    final double? sugLo = DoctorCoordinates.readSuggestedLongitude(r);
-    if (sugLa != null && sugLo != null) {
-      initLa = sugLa;
-      initLo = sugLo;
-    }
-    if (!mounted) {
-      return;
-    }
-    final LocationPickResult? picked =
-        await Navigator.of(context, rootNavigator: true)
-            .push<LocationPickResult>(
-      buildAdaptiveRtlRoute<LocationPickResult>(
-        LocationPickerScreen(
-          initialLatitude: initLa,
-          initialLongitude: initLo,
-          title: 'تأكيد موقع العيادة من الاقتراح',
-        ),
-      ),
-    );
-    if (picked == null || !mounted) {
-      return;
-    }
-    try {
-      final List<dynamic> doctorUpdated = await _supabase
-          .from(_adminDoctorsEntityTable())
-          .update(<String, dynamic>{
-            'latitude': picked.latitude,
-            'longitude': picked.longitude,
-          })
-          .eq('id', docId)
-          .select('id');
-      if (doctorUpdated.isEmpty) {
-        throw Exception('لم يتم تحديث بيانات الطبيب المستهدف.');
-      }
-      final List<dynamic> reportUpdated = await _supabase
-          .from(_adminReportsTable())
-          .update(<String, dynamic>{
-            'status': kReportStatusResolved,
-          })
-          .eq('id', r['id'])
-          .eq('status', kReportStatusPending)
-          .select('id');
-      if (reportUpdated.isEmpty) {
-        throw Exception('لم تتغير حالة الاقتراح (قد يكون عولج مسبقاً أو لا توجد صلاحية).');
-      }
-      await _syncReportTotal(docId);
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('تم تحديث إحداثيات العيادة من الاقتراح.'),
-        ),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشل تطبيق الموقع: $error')),
-      );
-    }
-  }
-
-  Future<void> _applyReportCorrection(Map<String, dynamic> r) async {
-    final int? docId = _adminReportTargetId(r);
-    if (docId == null) {
-      return;
-    }
-
-    if (r['info_issue_type']?.toString() == 'wrong_map_location') {
-      await _applyMapLocationFromReport(r, docId);
-      return;
-    }
-
-    Map<String, dynamic>? docRow;
-    try {
-      final List<SchemaColumn> rc =
-          _reportSchemaBundle?.primaryTarget?.refColumns ??
-              const <SchemaColumn>[];
-      final String selectList = rc.isEmpty
-          ? 'id, name, spec, addr, ph, ph2, notes'
-          : rc.map((SchemaColumn c) => c.columnName).join(', ');
-      final List<dynamic> res = await _supabase
-          .from(_adminDoctorsEntityTable())
-          .select(selectList)
-          .eq('id', docId)
-          .limit(1);
-      if (res.isNotEmpty) {
-        docRow = res.first as Map<String, dynamic>;
-      }
-    } catch (_) {}
-
-    if (!mounted) {
-      return;
-    }
-
-    final List<String> fields = _reportSchemaBundle?.primaryTarget == null
-        ? <String>['ph', 'ph2', 'addr', 'name', 'spec', 'notes']
-        : _reportSchemaBundle!.primaryTarget!.refColumns
-            .where(
-              (SchemaColumn c) =>
-                  !c.isPrimaryKey && !isReporterSkippableColumn(c),
-            )
-            .map((SchemaColumn c) => c.columnName)
-            .toList();
-    final Map<String, String> fieldLabels = <String, String>{
-      for (final String f in fields)
-        f: arabicLabelForColumn(
-          _schemaColumnByName(f) ??
-              SchemaColumn(
-                columnName: f,
-                dataType: 'text',
-                isNullable: true,
-                isPrimaryKey: false,
-              ),
-        ),
-    };
-
-    String selectedField = resolveReportTargetColumn(r) ??
-        _fieldForIssueType(r['info_issue_type']?.toString());
-    if (fields.isNotEmpty && !fields.contains(selectedField)) {
-      selectedField = fields.first;
-    }
-    if (fields.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('لا توجد أعمدة قابلة للتعديل في مخطط قاعدة البيانات.'),
-          ),
-        );
-      }
-      return;
-    }
-    final TextEditingController valueCtrl = TextEditingController(
-      text: (r['suggested_correction'] ?? '').toString(),
-    );
-
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext ctx) {
-        return StatefulBuilder(
-          builder: (BuildContext ctx2, StateSetter setSt) {
-            return AlertDialog(
-              title: Text('تطبيق تصحيح — رقم الطبيب: $docId'),
-              content: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    if (docRow != null) ...<Widget>[
-                      const Text(
-                        'البيانات الحالية:',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'الاسم: ${docRow['name']}\n'
-                        'التخصص: ${docRow['spec']}\n'
-                        'الهاتف: ${docRow['ph']}\n'
-                        'العنوان: ${docRow['addr']}',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      const SizedBox(height: 12),
-                    ],
-                    Text(
-                      'نوع الخطأ: ${_infoTypeLabelAr(r['info_issue_type']?.toString())}',
-                    ),
-                    const SizedBox(height: 2),
-                    Text('موضع الخطأ: ${r['error_location'] ?? ''}'),
-                    const SizedBox(height: 2),
-                    Text('التصحيح المقترح: ${r['suggested_correction'] ?? ''}'),
-                    const SizedBox(height: 12),
-                    const Text('الحقل المراد تعديله:'),
-                    DropdownButton<String>(
-                      value: selectedField,
-                      isExpanded: true,
-                      items: fields
-                          .map(
-                            (String f) => DropdownMenuItem<String>(
-                              value: f,
-                              child: Text(fieldLabels[f] ?? f),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (String? v) {
-                        if (v != null) {
-                          setSt(() => selectedField = v);
-                        }
-                      },
-                    ),
-                    if (docRow != null)
-                      Text(
-                        'القيمة الحالية: ${docRow[selectedField] ?? ''}',
-                        style: const TextStyle(
-                          color: Color(0xFF64748B),
-                          fontSize: 12,
-                        ),
-                      ),
-                    const SizedBox(height: 4),
-                    TextField(
-                      controller: valueCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'القيمة الجديدة',
-                        filled: true,
-                        fillColor: Color(0xFFF2F7FC),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actions: <Widget>[
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('إلغاء'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    final String newValue = valueCtrl.text.trim();
-                    final String field = selectedField;
-                    Navigator.of(ctx).pop();
-                    await _commitCorrection(r, docId, field, newValue);
-                  },
-                  child: const Text('تأكيد التعديل'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    valueCtrl.dispose();
-  }
-
-  Future<void> _commitCorrection(
-    Map<String, dynamic> r,
-    int docId,
-    String field,
-    String newValue,
-  ) async {
-    try {
-      final List<dynamic> doctorUpdated = await _supabase
-          .from(_adminDoctorsEntityTable())
-          .update(<String, dynamic>{field: newValue})
-          .eq('id', docId)
-          .select('id');
-      if (doctorUpdated.isEmpty) {
-        throw Exception('لم يتم تحديث بيانات الطبيب المستهدف.');
-      }
-      final List<dynamic> reportUpdated = await _supabase
-          .from(_adminReportsTable())
-          .update(<String, dynamic>{'status': kReportStatusResolved})
-          .eq('id', r['id'])
-          .eq('status', kReportStatusPending)
-          .select('id');
-      if (reportUpdated.isEmpty) {
-        throw Exception('لم تتغير حالة الاقتراح (قد يكون عولج مسبقاً أو لا توجد صلاحية).');
-      }
-      await _syncReportTotal(docId);
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('تم تطبيق التصحيح وتحديث جدول الأطباء.'),
-        ),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشل التطبيق: $error')),
-      );
-    }
-  }
-
-  // ─── إدارة الأطباء المباشرة ───────────────────────────────────────────────
-
-  Future<void> _searchDoctors(String query) async {
-    if (query.trim().isEmpty) {
-      setState(() {
-        _searchedDoctors = <Map<String, dynamic>>[];
-        _doctorSearchPerformed = false;
-      });
-      return;
-    }
-    setState(() => _isSearchingDoctors = true);
-    try {
-      final List<String> tokens = arabicSearchTokens(query);
-      final List<dynamic> results = await _supabase.rpc(
-        'search_doctors_by_tokens',
-        params: <String, dynamic>{'tokens': tokens},
-      );
-      setState(() {
-        _searchedDoctors = results.cast<Map<String, dynamic>>();
-        _doctorSearchPerformed = true;
-        _isSearchingDoctors = false;
-      });
-    } catch (e) {
-      setState(() => _isSearchingDoctors = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('خطأ في البحث: $e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _runWithSavingOverlay(Future<void> Function() job) async {
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext ctx) {
-        return PopScope(
-          canPop: false,
-          child: Center(
-            child: Card(
-              elevation: 8,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(28, 24, 28, 20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const <Widget>[
-                    CircularProgressIndicator(),
-                    SizedBox(height: 18),
-                    Text('جاري الحفظ...'),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-    try {
-      await job();
-    } finally {
-      if (mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
-    }
-  }
-
-  Future<void> _directAddDoctor(Map<String, dynamic> data) async {
-    await _runWithSavingOverlay(() async {
-      try {
-        await _supabase.from(kSupabaseDoctorsTable).insert(data);
-        if (!mounted) {
-          return;
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تمت الإضافة بنجاح.')),
-        );
-        if (_doctorSearchController.text.isNotEmpty) {
-          await _searchDoctors(_doctorSearchController.text);
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(humanReadableSupabaseWriteError(e))),
-          );
-        }
-      }
-    });
-  }
-
-  Future<void> _directEditDoctor(
-      dynamic docId, Map<String, dynamic> updates) async {
-    await _runWithSavingOverlay(() async {
-      try {
-        await _supabase
-            .from(kSupabaseDoctorsTable)
-            .update(updates)
-            .eq('id', docId);
-        if (!mounted) {
-          return;
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تم التعديل بنجاح.')),
-        );
-        if (_doctorSearchController.text.isNotEmpty) {
-          await _searchDoctors(_doctorSearchController.text);
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(humanReadableSupabaseWriteError(e))),
-          );
-        }
-      }
-    });
-  }
-
-  Future<void> _deleteDoctor(dynamic docId, String name) async {
-    try {
-      await _supabase.from(kSupabaseDoctorsTable).delete().eq('id', docId);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('تم حذف "$name".')));
-      setState(() {
-        _searchedDoctors
-            .removeWhere((Map<String, dynamic> d) => d['id'] == docId);
-      });
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('فشل الحذف: $e')));
-      }
-    }
-  }
-
-  Future<void> _confirmDeleteDoctor(dynamic docId, String name) async {
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
-        title: const Text('تأكيد الحذف'),
-        content: Text('هل تريد حذف الطبيب "$name" نهائياً؟'),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('إلغاء'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('حذف'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) {
-      await _deleteDoctor(docId, name);
-    }
-  }
-
-  Future<void> _showAddDoctorDialog() async {
-    final Map<String, dynamic>? result =
-        await Navigator.of(context).push<Map<String, dynamic>>(
-      buildAdaptiveRtlRoute<Map<String, dynamic>>(
-        const _AddEditDoctorPage(),
-      ),
-    );
-    if (result != null) {
-      await _directAddDoctor(result);
-    }
-  }
-
-  Future<void> _showEditDoctorDialog(Map<String, dynamic> doc) async {
-    final Map<String, dynamic>? result =
-        await Navigator.of(context).push<Map<String, dynamic>>(
-      buildAdaptiveRtlRoute<Map<String, dynamic>>(
-        _AddEditDoctorPage(doc: doc),
-      ),
-    );
-    if (result != null) {
-      await _directEditDoctor(doc['id'], result);
-    }
-  }
-
-  Widget _buildManageDoctorsTab() {
-    return Column(
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _doctorSearchController,
-                  decoration: InputDecoration(
-                    hintText: 'ابحث باسم الطبيب...',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _doctorSearchController.text.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.clear),
-                            onPressed: () {
-                              _doctorSearchController.clear();
-                              setState(() {
-                                _searchedDoctors = <Map<String, dynamic>>[];
-                                _doctorSearchPerformed = false;
-                              });
-                            },
-                          )
-                        : null,
-                    border: const OutlineInputBorder(),
-                    filled: true,
-                    fillColor: const Color(0xFFF2F7FC),
-                  ),
-                  onSubmitted: _searchDoctors,
-                  onChanged: (_) => setState(() {}),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: () => _searchDoctors(_doctorSearchController.text),
-                icon: const Icon(Icons.search),
-                label: const Text('بحث'),
-              ),
-            ],
-          ),
-        ),
-        if (_isSearchingDoctors) const LinearProgressIndicator(),
-        Expanded(
-          child: _doctorSearchPerformed && _searchedDoctors.isEmpty
-              ? const Center(child: Text('لا توجد نتائج.'))
-              : !_doctorSearchPerformed
-                  ? Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          const Icon(Icons.manage_accounts,
-                              size: 72, color: Color(0xFFBBBBBB)),
-                          const SizedBox(height: 12),
-                          const Text(
-                            'ابحث عن طبيب بالاسم للتعديل أو الحذف',
-                            style: TextStyle(color: Color(0xFF4A5568)),
-                          ),
-                          const SizedBox(height: 24),
-                          FilledButton.icon(
-                            onPressed: _showAddDoctorDialog,
-                            icon: const Icon(Icons.person_add),
-                            label: const Text('إضافة طبيب مباشرة'),
-                          ),
-                        ],
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      itemCount: _searchedDoctors.length,
-                      itemBuilder: (BuildContext ctx, int i) {
-                        final Map<String, dynamic> doc = _searchedDoctors[i];
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          child: ListTile(
-                            title: Text(doc['name']?.toString() ?? ''),
-                            subtitle: Text(
-                              '${doc['spec'] ?? ''}  •  ${doc['area'] ?? ''}  •  ${doc['gove'] ?? ''}',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: <Widget>[
-                                IconButton(
-                                  icon: const Icon(Icons.edit,
-                                      color: Color(0xFF42A5F5)),
-                                  tooltip: 'تعديل',
-                                  onPressed: () =>
-                                      _showEditDoctorDialog(doc),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.delete,
-                                      color: Colors.red),
-                                  tooltip: 'حذف',
-                                  onPressed: () => _confirmDeleteDoctor(
-                                      doc['id'],
-                                      doc['name']?.toString() ?? ''),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-        ),
-      ],
-    );
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-
-  @override
-  Widget build(BuildContext context) {
-    const Color primaryMedicalBlue = Color(0xFF42A5F5);
-    // فصل شجرة ويدجت شاشة الدخول عن [DefaultTabController] يمنع فشل
-    // `'_dependents.isEmpty': is not true` عند التبديل من كلمة مرور → تبويبات.
-    if (!_authenticated) {
-      return Scaffold(
-        appBar: AppBar(
-          title: const Text('لوحة الأدمن'),
-          backgroundColor: primaryMedicalBlue,
-          foregroundColor: Colors.white,
-          leading: BackButton(
-            color: Colors.white,
-            onPressed: () => Navigator.maybePop(context),
-          ),
-          actions: <Widget>[
-            IconButton(
-              tooltip: 'الرئيسية',
-              onPressed: () => popToAppRoot(context),
-              icon: const Icon(Icons.home_rounded),
-            ),
-          ],
-        ),
-        body: _buildPasswordGate(),
-      );
-    }
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('لوحة الأدمن'),
-          backgroundColor: primaryMedicalBlue,
-          foregroundColor: Colors.white,
-          leading: BackButton(
-            color: Colors.white,
-            onPressed: () => Navigator.maybePop(context),
-          ),
-          actions: <Widget>[
-            IconButton(
-              tooltip: 'الرئيسية',
-              onPressed: () => popToAppRoot(context),
-              icon: const Icon(Icons.home_rounded),
-            ),
-          ],
-          bottom: const TabBar(
-            labelColor: Colors.white,
-            unselectedLabelColor: Colors.white70,
-            indicatorColor: Colors.white,
-            tabs: <Widget>[
-              Tab(icon: Icon(Icons.rate_review), text: 'اقتراحات'),
-              Tab(icon: Icon(Icons.pending_actions), text: 'طلبات'),
-              Tab(icon: Icon(Icons.manage_accounts), text: 'الأطباء'),
-            ],
-          ),
-        ),
-        body: _buildDashboardBody(),
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: _showAddDoctorDialog,
-          backgroundColor: primaryMedicalBlue,
-          foregroundColor: Colors.white,
-          icon: const Icon(Icons.person_add),
-          label: const Text('إضافة طبيب'),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPasswordGate() {
-    final bool passwordReady = kAdminPassword.isNotEmpty;
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const SizedBox(height: 24),
-            if (!passwordReady)
-              Container(
-                margin: const EdgeInsets.only(bottom: 16),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  border: Border.all(color: Colors.orange),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Text(
-                  '⚠️  كلمة المرور غير مكوّنة.\n'
-                  'محلياً: أضف ADMIN_PASSWORD في إعدادات التشغيل (.vscode/launch.json).\n'
-                  'على CI: Secret باسم ADMIN_PASSWORD في GitHub Actions.',
-                  style: TextStyle(color: Colors.orange, fontSize: 13),
-                ),
-              ),
-            TextField(
-              controller: _passwordController,
-              obscureText: true,
-              onSubmitted: (_) => _tryLogin(),
-              decoration: const InputDecoration(
-                labelText: 'كلمة مرور الأدمن',
-                filled: true,
-                fillColor: Color(0xFFF2F7FC),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _tryLogin,
-                child: const Text('دخول'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _tryLogin() {
-    if (kAdminPassword.isEmpty) {
-      if (_canBypassAdminPasswordInDebug) {
-        setState(() => _authenticated = true);
-        _loadDashboardData();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('وضع التطوير: تم تجاوز كلمة المرور مؤقتًا.'),
-            duration: Duration(seconds: 3),
-          ),
-        );
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'كلمة المرور غير مكوّنة — راجع launch.json أو GitHub Secrets (ADMIN_PASSWORD).',
-          ),
-          duration: Duration(seconds: 4),
-        ),
-      );
-      return;
-    }
-    if (_normalizeAdminPassword(_passwordController.text) ==
-        _normalizeAdminPassword(kAdminPassword)) {
-      setState(() => _authenticated = true);
-      _loadDashboardData();
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('كلمة المرور غير صحيحة')),
-      );
-    }
-  }
-
-
-  String _infoTypeLabelAr(String? key) {
-    if (key == null || key.isEmpty) {
-      return '';
-    }
-    if (key.startsWith('field_edit:')) {
-      final String col = key.substring('field_edit:'.length).trim();
-      final SchemaColumn? sc = _schemaColumnByName(col);
-      if (sc != null) {
-        return arabicLabelForColumn(sc);
-      }
-      return col;
-    }
-    return kInfoCorrectionTypeLabels[key] ?? key;
-  }
-
-  Widget _buildReportRowCard(Map<String, dynamic> r) {
-    final String type = _infoTypeLabelAr(r['info_issue_type']?.toString());
-    final String name = (r['doctor_name'] as String?)?.trim() ?? '';
-    final String namePart = name.isNotEmpty ? ' — $name' : '';
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          ListTile(
-            isThreeLine: true,
-            title: Text('id: ${_adminReportTargetId(r) ?? ''}$namePart  |  $type'),
-            subtitle: Text(
-              'الخطأ: ${r['error_location']}\n'
-              'التصحيح المقترح: ${r['suggested_correction']}\n'
-              'التاريخ: ${r['created_at'] ?? ''}',
-              style: const TextStyle(fontSize: 12, height: 1.35),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(left: 8, right: 8, bottom: 8),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () => _approveReport(r),
-                    icon: const Icon(Icons.check, size: 18),
-                    label: const Text('موافقة'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => _applyReportCorrection(r),
-                    icon: const Icon(Icons.tune, size: 18),
-                    label: const Text('تعديل يدوي'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => _deleteReport(r),
-                    icon: const Icon(Icons.delete_outline, size: 18),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.red,
-                    ),
-                    label: const Text('حذف'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _approveClinicClaim(Map<String, dynamic> row) async {
-    try {
-      final List<dynamic> updated = await _supabase
-          .from(kSupabaseClinicClaimRequestsTable)
-          .update(<String, dynamic>{'status': 'approved'})
-          .eq('id', row['id'])
-          .eq('status', 'pending')
-          .select('id, status');
-      if (updated.isEmpty) {
-        throw Exception('تعذرت الموافقة: الطلب غير موجود أو عولج مسبقاً.');
-      }
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تمت الموافقة على الطلب وربط العيادة.')),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشلت الموافقة على طلب الاستحواذ: $error')),
-      );
-    }
-  }
-
-  Future<void> _rejectClinicClaim(Map<String, dynamic> row) async {
-    try {
-      final List<dynamic> updated = await _supabase
-          .from(kSupabaseClinicClaimRequestsTable)
-          .update(<String, dynamic>{'status': 'rejected'})
-          .eq('id', row['id'])
-          .eq('status', 'pending')
-          .select('id, status');
-      if (updated.isEmpty) {
-        throw Exception('تعذر الرفض: الطلب غير موجود أو عولج مسبقاً.');
-      }
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم رفض طلب الاستحواذ.')),
-      );
-      await _loadDashboardData();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('فشل رفض طلب الاستحواذ: $error')),
-      );
-    }
-  }
-
-  Widget _buildDashboardBody() {
-    if (_isLoading) {
-      return const TabBarView(
-        children: <Widget>[
-          Center(child: CircularProgressIndicator()),
-          SizedBox.shrink(),
-          SizedBox.shrink(),
-        ],
-      );
-    }
-    return TabBarView(
-      children: <Widget>[
-        // ── تبويب 1: اقتراحات التعديل ─────────────────────────────────────
-        RefreshIndicator(
-          onRefresh: _loadDashboardData,
-          child: _reportRows.isEmpty
-              ? ListView(
-                  padding: const EdgeInsets.all(24),
-                  children: const <Widget>[
-                    SizedBox(height: 80),
-                    Center(
-                      child: Text(
-                        'لا توجد اقتراحات تعديل.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Color(0xFF4A5568)),
-                      ),
-                    ),
-                  ],
-                )
-              : ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: _reportRows.map(_buildReportRowCard).toList(),
-                ),
-        ),
-
-        // ── تبويب 2: طلبات الإضافة ─────────────────────────────────────────
-        RefreshIndicator(
-          onRefresh: _loadDashboardData,
-          child: _pendingDoctors.isEmpty
-              ? ListView(
-                  padding: const EdgeInsets.all(24),
-                  children: const <Widget>[
-                    SizedBox(height: 80),
-                    Center(
-                      child: Text(
-                        'لا توجد طلبات بانتظار المراجعة.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Color(0xFF4A5568)),
-                      ),
-                    ),
-                  ],
-                )
-              : ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: <Widget>[
-                    if (_clinicClaimRequests.isNotEmpty) ...<Widget>[
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(4, 4, 4, 10),
-                        child: Text(
-                          'طلبات استحواذ العيادات',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: Color(0xFF1D3557),
-                          ),
-                        ),
-                      ),
-                      ..._clinicClaimRequests.map(
-                        (Map<String, dynamic> item) => Card(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                                vertical: 8, horizontal: 4),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: <Widget>[
-                                ListTile(
-                                  title: Text(
-                                    (item['clinic_name'] ?? '—').toString(),
-                                  ),
-                                  subtitle: Text(
-                                    'doctor_id: ${(item['doctor_id'] ?? '').toString()}\n'
-                                    'user_id: ${(item['user_id'] ?? '').toString()}\n'
-                                    'التاريخ: ${(item['created_at'] ?? '').toString()}',
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                  isThreeLine: true,
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.only(
-                                      left: 8, right: 8, bottom: 8),
-                                  child: Row(
-                                    children: <Widget>[
-                                      Expanded(
-                                        child: FilledButton(
-                                          onPressed: () =>
-                                              _approveClinicClaim(item),
-                                          child: const Text('موافقة وربط'),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: OutlinedButton(
-                                          onPressed: () =>
-                                              _rejectClinicClaim(item),
-                                          child: const Text('رفض'),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      const Divider(height: 28),
-                    ],
-                    if (_pendingDoctors.isNotEmpty)
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(4, 0, 4, 10),
-                        child: Text(
-                          'طلبات إضافة عيادات',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: Color(0xFF1D3557),
-                          ),
-                        ),
-                      ),
-                    ..._pendingDoctors.map((Map<String, dynamic> item) {
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 8, horizontal: 4),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: <Widget>[
-                              ListTile(
-                                title:
-                                    Text((item['name'] ?? 'بدون اسم').toString()),
-                                subtitle: Text(
-                                  'التخصص: ${(item['spec'] ?? '').toString()}\n'
-                                  'المنطقة: ${(item['area'] ?? '').toString()}\n'
-                                  'المحافظة: ${(item['gove'] ?? '').toString()}',
-                                ),
-                                isThreeLine: true,
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.only(
-                                    left: 8, right: 8, bottom: 8),
-                                child: Row(
-                                  children: <Widget>[
-                                    Expanded(
-                                      child: FilledButton(
-                                        onPressed: () => _approveRequest(item),
-                                        child: const Text('موافق (إضافة)'),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: OutlinedButton(
-                                        onPressed: () => _rejectRequest(item),
-                                        child: const Text('غير موافق (حذف)'),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }),
-                  ],
-                ),
-        ),
-
-        // ── تبويب 3: إدارة الأطباء ─────────────────────────────────────────
-        _buildManageDoctorsTab(),
-      ],
-    );
-  }
-}
-
-// ── صفحة الإضافة/التعديل للأدمن: نفس كتلة الخريطة التي في [AddClinicPage]. ─
-
-class _AddEditDoctorPage extends StatefulWidget {
-  const _AddEditDoctorPage({this.doc});
-  final Map<String, dynamic>? doc;
-
-  @override
-  State<_AddEditDoctorPage> createState() => _AddEditDoctorPageState();
-}
-
-class _AddEditDoctorPageState extends State<_AddEditDoctorPage> {
-  late final TextEditingController _nameCtrl;
-  late final TextEditingController _physicianCustomCtrl;
-  late final TextEditingController _imagingCustomCtrl;
-  late final TextEditingController _areaOtherCtrl;
-  late final TextEditingController _basraCustomAreaCtrl;
-  late final TextEditingController _textAddrCtrl;
-  late final TextEditingController _phCtrl;
-  late final TextEditingController _ph2Ctrl;
-  late final TextEditingController _notesCtrl;
-
-  _MedicalFieldType? _medicalType;
-  String? _selectedPhysicianSpec;
-  bool _physicianUseCustom = false;
-  String? _selectedImagingType;
-  bool _imagingUseCustom = false;
-  String _selectedGove = kGovernorates.first;
-  String? _selectedBasraArea;
-  bool _basraUseCustomArea = false;
-  double? _pickedLatitude;
-  double? _pickedLongitude;
-
-  @override
-  void initState() {
-    super.initState();
-    _nameCtrl = TextEditingController();
-    _physicianCustomCtrl = TextEditingController();
-    _imagingCustomCtrl = TextEditingController();
-    _areaOtherCtrl = TextEditingController();
-    _basraCustomAreaCtrl = TextEditingController();
-    _textAddrCtrl = TextEditingController();
-    _phCtrl = TextEditingController();
-    _ph2Ctrl = TextEditingController();
-    _notesCtrl = TextEditingController();
-
-    final Map<String, dynamic>? doc = widget.doc;
-    if (doc != null) {
-      _nameCtrl.text = doc['name']?.toString() ?? '';
-      _initSpec(doc['spec']?.toString() ?? '');
-      final String gove = doc['gove']?.toString() ?? kGovernorates.first;
-      _selectedGove = kGovernorates.contains(gove) ? gove : kGovernorates.first;
-      _initArea(doc['area']?.toString() ?? '', _selectedGove);
-      final String addr = doc['addr']?.toString() ?? '';
-      if (!addr.startsWith('http://') && !addr.startsWith('https://')) {
-        _textAddrCtrl.text = addr;
-      }
-      _parseNotes(doc['notes']?.toString() ?? '');
-      _phCtrl.text = doc['ph']?.toString() ?? '';
-      _ph2Ctrl.text = doc['ph2']?.toString() ?? '';
-      _pickedLatitude = DoctorCoordinates.readLatitude(doc);
-      _pickedLongitude = DoctorCoordinates.readLongitude(doc);
-    }
-  }
-
-  void _initSpec(String spec) {
-    final String trimmed = spec.trim();
-    if (trimmed.isEmpty) return;
-    if (trimmed == kSpecDentistry) {
-      _medicalType = _MedicalFieldType.dentist;
-    } else if (trimmed == kSpecPharmacy) {
-      _medicalType = _MedicalFieldType.pharmacy;
-    } else if (trimmed == kSpecLaboratory) {
-      _medicalType = _MedicalFieldType.lab;
-    } else if (kImagingModalityOptions.contains(trimmed)) {
-      _medicalType = _MedicalFieldType.radiology;
-      _selectedImagingType = trimmed;
-    } else if (kPhysicianSpecializations.contains(trimmed)) {
-      _medicalType = _MedicalFieldType.physician;
-      _selectedPhysicianSpec = trimmed;
-    } else {
-      _medicalType = _MedicalFieldType.physician;
-      _physicianUseCustom = true;
-      _selectedPhysicianSpec = kDropdownAddCustom;
-      _physicianCustomCtrl.text = trimmed;
-    }
-  }
-
-  void _initArea(String area, String gove) {
-    final String trimmedArea = area.trim();
-    if (gove == 'البصرة') {
-      if (kBasraAreas.contains(trimmedArea)) {
-        _selectedBasraArea = trimmedArea;
-      } else if (trimmedArea.isNotEmpty) {
-        _basraUseCustomArea = true;
-        _selectedBasraArea = kDropdownAddCustom;
-        _basraCustomAreaCtrl.text = area;
-      }
-    } else {
-      _areaOtherCtrl.text = area;
-    }
-  }
-
-  void _parseNotes(String raw) {
-    final RegExpMatch? m = RegExp(
-      r'^العنوان: (.*?)\n\nملاحظات: (.*)',
-      dotAll: true,
-    ).firstMatch(raw);
-    if (m != null) {
-      if (_textAddrCtrl.text.isEmpty) _textAddrCtrl.text = m.group(1) ?? '';
-      _notesCtrl.text = m.group(2) ?? '';
-    } else {
-      _notesCtrl.text = raw;
-    }
-  }
-
-  String _buildSpec() {
-    switch (_medicalType) {
-      case _MedicalFieldType.physician:
-        return _physicianUseCustom
-            ? _physicianCustomCtrl.text.trim()
-            : _selectedPhysicianSpec ?? '';
-      case _MedicalFieldType.radiology:
-        return _imagingUseCustom
-            ? _imagingCustomCtrl.text.trim()
-            : _selectedImagingType ?? '';
-      case _MedicalFieldType.dentist:
-        return kSpecDentistry;
-      case _MedicalFieldType.pharmacy:
-        return kSpecPharmacy;
-      case _MedicalFieldType.lab:
-        return kSpecLaboratory;
-      case null:
-        return '';
-    }
-  }
-
-  String _buildArea() {
-    if (_selectedGove == 'البصرة') {
-      return _basraUseCustomArea
-          ? _basraCustomAreaCtrl.text.trim()
-          : _selectedBasraArea ?? '';
-    }
-    return _areaOtherCtrl.text.trim();
-  }
-
-  InputDecoration _dec(String label) => InputDecoration(
-        labelText: label,
-        filled: true,
-        fillColor: const Color(0xFFF2F7FC),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFF1976D2), width: 2),
-        ),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      );
-
-  Widget _medTile(String title, _MedicalFieldType type) {
-    final bool sel = _medicalType == type;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: Material(
-        color: sel ? const Color(0xFFE3F2FD) : const Color(0xFFF7FAFC),
-        borderRadius: BorderRadius.circular(12),
-        child: ListTile(
-          dense: true,
-          onTap: () => setState(() {
-            _medicalType = type;
-            _selectedPhysicianSpec = null;
-            _selectedImagingType = null;
-            _physicianUseCustom = false;
-            _imagingUseCustom = false;
-          }),
-          leading: Icon(
-            sel
-                ? Icons.radio_button_checked_rounded
-                : Icons.radio_button_off_rounded,
-            color:
-                sel ? const Color(0xFF1976D2) : const Color(0xFF94A3B8),
-          ),
-          title: Text(title,
-              style: const TextStyle(fontWeight: FontWeight.w600)),
-        ),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    _nameCtrl.dispose();
-    _physicianCustomCtrl.dispose();
-    _imagingCustomCtrl.dispose();
-    _areaOtherCtrl.dispose();
-    _basraCustomAreaCtrl.dispose();
-    _textAddrCtrl.dispose();
-    _phCtrl.dispose();
-    _ph2Ctrl.dispose();
-    _notesCtrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bool isEdit = widget.doc != null;
-    const Color primaryMedicalBlue = Color(0xFF42A5F5);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isEdit
-            ? 'تعديل: ${widget.doc!['name'] ?? ''}'
-            : 'إضافة طبيب / عيادة'),
-        backgroundColor: primaryMedicalBlue,
-        foregroundColor: Colors.white,
-        leading: const CloseButton(color: Colors.white),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              // ── الاسم ───────────────────────────────────────────────────────
-              TextField(
-                controller: _nameCtrl,
-                textInputAction: TextInputAction.next,
-                decoration: _dec('اسم الطبيب / المركز *'),
-              ),
-              const SizedBox(height: 12),
-              // ── المجال الطبي ─────────────────────────────────────────────────
-              const Text('المجال الطبي *',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                      color: Color(0xFF475569))),
-              const SizedBox(height: 6),
-              _medTile('طبيب', _MedicalFieldType.physician),
-              _medTile('اشعة وسونار', _MedicalFieldType.radiology),
-              _medTile('طبيب أسنان', _MedicalFieldType.dentist),
-              _medTile('صيدلية', _MedicalFieldType.pharmacy),
-              _medTile('مختبر', _MedicalFieldType.lab),
-              // ── تخصص الطبيب ─────────────────────────────────────────────────
-              if (_medicalType == _MedicalFieldType.physician) ...<Widget>[
-                const SizedBox(height: 10),
-                const Text('التخصص *',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w600, fontSize: 13)),
-                const SizedBox(height: 6),
-                DropdownButtonFormField<String>(
-                  key: ValueKey<String>(
-                      'phys_${_physicianUseCustom}_$_selectedPhysicianSpec'),
-                  initialValue: _physicianUseCustom
-                      ? kDropdownAddCustom
-                      : _selectedPhysicianSpec,
-                  isExpanded: true,
-                  decoration: _dec('اختر التخصص'),
-                  items: <DropdownMenuItem<String>>[
-                    ...kPhysicianSpecializations.map((String s) =>
-                        DropdownMenuItem<String>(
-                            value: s, child: Text(s))),
-                    const DropdownMenuItem<String>(
-                        value: kDropdownAddCustom,
-                        child: Text('إضافة تخصص جديد')),
-                  ],
-                  onChanged: (String? v) {
-                    if (v == null) return;
-                    setState(() {
-                      if (v == kDropdownAddCustom) {
-                        _physicianUseCustom = true;
-                        _selectedPhysicianSpec = kDropdownAddCustom;
-                      } else {
-                        _physicianUseCustom = false;
-                        _selectedPhysicianSpec = v;
-                      }
-                    });
-                  },
-                ),
-                if (_physicianUseCustom) ...<Widget>[
-                  const SizedBox(height: 8),
-                  TextField(
-                      controller: _physicianCustomCtrl,
-                      decoration: _dec('اكتب التخصص الجديد *')),
-                ],
-              ],
-              // ── نوع الاشعة ───────────────────────────────────────────────────
-              if (_medicalType == _MedicalFieldType.radiology) ...<Widget>[
-                const SizedBox(height: 10),
-                const Text('نوع الاشعة *',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w600, fontSize: 13)),
-                const SizedBox(height: 6),
-                DropdownButtonFormField<String>(
-                  key: ValueKey<String>(
-                      'img_${_imagingUseCustom}_$_selectedImagingType'),
-                  initialValue: _imagingUseCustom
-                      ? kDropdownAddCustom
-                      : _selectedImagingType,
-                  isExpanded: true,
-                  decoration: _dec('اختر النوع'),
-                  items: <DropdownMenuItem<String>>[
-                    ...kImagingModalityOptions.map((String s) =>
-                        DropdownMenuItem<String>(
-                            value: s, child: Text(s))),
-                    const DropdownMenuItem<String>(
-                        value: kDropdownAddCustom,
-                        child: Text('إضافة نوع جديد')),
-                  ],
-                  onChanged: (String? v) {
-                    if (v == null) return;
-                    setState(() {
-                      if (v == kDropdownAddCustom) {
-                        _imagingUseCustom = true;
-                        _selectedImagingType = kDropdownAddCustom;
-                      } else {
-                        _imagingUseCustom = false;
-                        _selectedImagingType = v;
-                      }
-                    });
-                  },
-                ),
-                if (_imagingUseCustom) ...<Widget>[
-                  const SizedBox(height: 8),
-                  TextField(
-                      controller: _imagingCustomCtrl,
-                      decoration: _dec('اكتب النوع الجديد *')),
-                ],
-              ],
-              const SizedBox(height: 12),
-              // ── المحافظة ─────────────────────────────────────────────────────
-              DropdownButtonFormField<String>(
-                key: ValueKey<String>(_selectedGove),
-                initialValue: _selectedGove,
-                isExpanded: true,
-                decoration: _dec('المحافظة *'),
-                items: kGovernorates
-                    .map((String g) => DropdownMenuItem<String>(
-                        value: g, child: Text(g)))
-                    .toList(),
-                onChanged: (String? v) {
-                  if (v == null) return;
-                  setState(() {
-                    _selectedGove = v;
-                    if (v != 'البصرة') {
-                      _selectedBasraArea = null;
-                      _basraUseCustomArea = false;
-                    }
-                  });
-                },
-              ),
-              const SizedBox(height: 8),
-              // ── المنطقة ──────────────────────────────────────────────────────
-              if (_selectedGove == 'البصرة') ...<Widget>[
-                const Text('المنطقة *',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w600, fontSize: 13)),
-                const SizedBox(height: 6),
-                DropdownButtonFormField<String>(
-                  key: ValueKey<String>(
-                      'bs_${_basraUseCustomArea}_$_selectedBasraArea'),
-                  initialValue: _basraUseCustomArea
-                      ? kDropdownAddCustom
-                      : _selectedBasraArea,
-                  isExpanded: true,
-                  decoration: _dec('اختر المنطقة'),
-                  items: <DropdownMenuItem<String>>[
-                    ...kBasraAreas.map((String a) =>
-                        DropdownMenuItem<String>(
-                            value: a, child: Text(a))),
-                    const DropdownMenuItem<String>(
-                        value: kDropdownAddCustom,
-                        child: Text('إضافة منطقة جديدة')),
-                  ],
-                  onChanged: (String? v) {
-                    if (v == null) return;
-                    setState(() {
-                      if (v == kDropdownAddCustom) {
-                        _basraUseCustomArea = true;
-                        _selectedBasraArea = kDropdownAddCustom;
-                      } else {
-                        _basraUseCustomArea = false;
-                        _selectedBasraArea = v;
-                      }
-                    });
-                  },
-                ),
-                if (_basraUseCustomArea) ...<Widget>[
-                  const SizedBox(height: 8),
-                  TextField(
-                      controller: _basraCustomAreaCtrl,
-                      decoration: _dec('اسم المنطقة *')),
-                ],
-              ] else
-                TextField(
-                    controller: _areaOtherCtrl,
-                    decoration: _dec('المنطقة *')),
-              const SizedBox(height: 8),
-              // ── عنوان نصي ────────────────────────────────────────────────────
-              TextField(
-                controller: _textAddrCtrl,
-                minLines: 1,
-                maxLines: 3,
-                textInputAction: TextInputAction.next,
-                decoration: _dec('عنوان العيادة (نص) *'),
-              ),
-              const SizedBox(height: 8),
-              // ── الهاتف ───────────────────────────────────────────────────────
-              TextField(
-                controller: _phCtrl,
-                keyboardType: TextInputType.phone,
-                textInputAction: TextInputAction.next,
-                decoration: _dec('رقم الهاتف *'),
-              ),
-              const SizedBox(height: 8),
-              // ── الهاتف الثاني ────────────────────────────────────────────────
-              TextField(
-                controller: _ph2Ctrl,
-                keyboardType: TextInputType.phone,
-                textInputAction: TextInputAction.next,
-                decoration: _dec('الهاتف الثاني (اختياري)'),
-              ),
-              const SizedBox(height: 8),
-              // ── ملاحظات ──────────────────────────────────────────────────────
-              TextField(
-                controller: _notesCtrl,
-                minLines: 3,
-                maxLines: 6,
-                decoration: _dec('ملاحظات *'),
-              ),
-              const SizedBox(height: 20),
-              addClinicStyleMapLocationBlock(
-                latitude: _pickedLatitude,
-                longitude: _pickedLongitude,
-                onChanged: (double? latitude, double? longitude) {
-                  setState(() {
-                    _pickedLatitude = latitude;
-                    _pickedLongitude = longitude;
-                  });
-                },
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('إلغاء'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    flex: 2,
-                    child: FilledButton(
-                      onPressed: _submitForm,
-                      child: Text(isEdit ? 'حفظ التعديل' : 'إضافة'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _submitForm() {
-    final String name = _nameCtrl.text.trim();
-    final String textAddr = _textAddrCtrl.text.trim();
-    final String ph = _phCtrl.text.trim();
-    final String notes = _notesCtrl.text.trim();
-    final String area = _buildArea();
-
-    String? error;
-    if (name.length < 2) {
-      error = 'أدخل اسم الطبيب أو المركز';
-    } else if (_medicalType == null) {
-      error = 'اختر المجال الطبي';
-    } else if (_medicalType == _MedicalFieldType.physician &&
-        !_physicianUseCustom &&
-        _selectedPhysicianSpec == null) {
-      error = 'اختر التخصص';
-    } else if (_medicalType == _MedicalFieldType.physician &&
-        _physicianUseCustom &&
-        _physicianCustomCtrl.text.trim().length < 2) {
-      error = 'أدخل التخصص';
-    } else if (_medicalType == _MedicalFieldType.radiology &&
-        !_imagingUseCustom &&
-        _selectedImagingType == null) {
-      error = 'اختر نوع الاشعة';
-    } else if (_medicalType == _MedicalFieldType.radiology &&
-        _imagingUseCustom &&
-        _imagingCustomCtrl.text.trim().length < 2) {
-      error = 'أدخل نوع الاشعة';
-    } else if (area.length < 2) {
-      error = 'أدخل المنطقة';
-    } else if (textAddr.length < 3) {
-      error = 'أدخل عنوان العيادة';
-    } else if (ph.length < 6) {
-      error = 'أدخل رقم الهاتف';
-    } else if (notes.length < 3) {
-      error = 'أدخل الملاحظات';
-    } else if (_pickedLatitude == null || _pickedLongitude == null) {
-      error = 'يجب تحديد موقع العيادة على خرائط Google';
-    }
-
-    if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
-      return;
-    }
-
-    final Map<String, dynamic> row = <String, dynamic>{
-      'name': name,
-      'spec': _buildSpec(),
-      'gove': _selectedGove,
-      'area': area,
-      'addr': textAddr,
-      'ph': ph,
-      'ph2': _ph2Ctrl.text.trim(),
-      'notes': 'العنوان: $textAddr\n\nملاحظات: $notes',
-      ...DoctorCoordinates.supabasePair(
-        latitude: _pickedLatitude,
-        longitude: _pickedLongitude,
-      ),
-    };
-    Navigator.of(context).pop(row);
   }
 }
 

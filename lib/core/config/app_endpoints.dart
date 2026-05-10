@@ -1,3 +1,4 @@
+// ✅ UPDATED 2026-05-09
 import 'package:flutter/foundation.dart' show kDebugMode;
 
 /// Centralized constants for all Supabase table/bucket names and future API endpoints.
@@ -9,6 +10,19 @@ abstract final class AppEndpoints {
   static const String pendingDoctors        = 'pending_doctors';
   static const String clinicClaimRequests   = 'clinic_claim_requests';
   static const String verificationRequests  = 'verification_requests';
+  static const String specializations       = 'specializations';
+  static const String dailyReportCounts     = 'daily_report_counts';
+
+  // ── Supabase RPC names ───────────────────────────────────────────────────────
+  static const String adminApproveVerification     = 'admin_approve_verification';
+  static const String adminRejectVerification      = 'admin_reject_verification';
+  static const String adminApplyReportCorrection   = 'admin_apply_report_correction';
+  static const String adminApplyCoordCorrection    = 'admin_apply_coord_correction';
+  static const String suggestSpecialization        = 'suggest_specialization';
+  static const String getDoctorsPageKeyset         = 'get_doctors_page_keyset';
+  static const String findDuplicateDoctor          = 'find_duplicate_doctor';
+  static const String dailyReportQuota             = 'daily_report_quota';
+  static const String refreshDoctorReportRatios    = 'refresh_doctor_report_ratios';
 
   // ── Supabase storage buckets ─────────────────────────────────────────────────
   static const String clinicProfileImages   = 'clinic-profile-images';
