@@ -2,7 +2,7 @@
     "name": "المدار الطبي",
     "short_name": "المدار الطبي",
     "description": "دليل الأطباء والعيادات في العراق",
-    "start_url": ".",
+    "start_url": "/",
     "display": "standalone",
     "background_color": "#0f1117",
     "theme_color": "#1a7a3c",

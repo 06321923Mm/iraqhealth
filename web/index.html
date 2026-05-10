@@ -4,6 +4,7 @@
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="المدار الطبي - دليل الأطباء والعيادات في العراق">
 
@@ -23,6 +24,17 @@
 
 </head>
 <body>
+  <!-- Restore URL after GitHub Pages 404 redirect -->
+  <script>
+    (function () {
+      var redirect = sessionStorage.getItem('ghpages_redirect');
+      if (redirect) {
+        sessionStorage.removeItem('ghpages_redirect');
+        history.replaceState(null, null, redirect);
+      }
+    })();
+  </script>
+
   <script src="flutter_bootstrap.js" async></script>
 
   <script type="module">
