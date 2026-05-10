@@ -21,6 +21,12 @@ version: 1.0.0+1
 environment:
   sdk: ^3.11.4
 
+# ─── Dependency Notes ──────────────────────────────────────────────────────
+# Last audited: 2026-05-09
+# APK size target: < 50MB per-ABI split
+# Run `flutter build apk --analyze-size` to check current breakdown
+# ──────────────────────────────────────────────────────────────────────────
+
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
 # consider running `flutter pub upgrade --major-versions`. Alternatively,
@@ -51,16 +57,22 @@ dependencies:
   google_sign_in: ^6.2.4
   flutter_dotenv: ^5.2.1
   image_picker: ^1.2.2
-  go_router: ^17.2.3
   cached_network_image: ^3.4.1
   shimmer: ^3.0.0
+  # connectivity_plus: Used in lib/core/cache/connectivity_service.dart for offline detection.
   connectivity_plus: ^7.1.1
   dio: ^5.9.2
-  flutter_local_notifications: ^21.0.0
   permission_handler: ^12.0.1
+  hive_flutter: ^1.1.0
+  flutter_image_compress: ^2.3.0
+  blurhash_dart: ^1.2.1
+  flutter_blurhash: ^0.8.2
+  image: ^4.2.0
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
@@ -90,6 +102,9 @@ flutter_launcher_icons:
   ios: true
   web:
     generate: true
+  # Image optimization: ensure app_icon.png is WebP-optimized before running
+  # flutter_launcher_icons. Use: cwebp -q 90 app_icon.png -o app_icon.webp
+  # Target: < 512 KB per source icon. The tool handles all density variants.
   image_path: assets/icons/app_icon.png
   adaptive_icon_background: "#0066CC"
   adaptive_icon_foreground: assets/icons/app_icon_foreground.png
