@@ -37,7 +37,6 @@ import 'favorites_provider.dart';
 import 'firebase_options.dart';
 import 'pwa_install_stub.dart'
     if (dart.library.js) 'pwa_install_web.dart';
-import 'supabase_write_errors.dart';
 import 'edit_suggestion/edit_suggestion_schema_service.dart';
 import 'edit_suggestion/schema_models.dart';
 import 'widgets/doctor_list_skeleton.dart';
@@ -3670,12 +3669,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
     return _areaOtherGovernorateController.text.trim();
   }
 
-  String _buildNotesForSubmit() {
-    final String a = _addressController.text.trim();
-    final String n = _notesController.text.trim();
-    return 'العنوان: $a\n\nملاحظات: $n';
-  }
-
   bool _validateStep1() {
     return MedicalCategorySnapshot.fromStoredSpec(_medicalStoredSpec)
         .validateBeforeEncode();
@@ -3694,55 +3687,6 @@ class _AddClinicPageState extends State<AddClinicPage> {
           _selectedBasraArea!.isNotEmpty;
     }
     return _areaOtherGovernorateController.text.trim().length >= 2;
-  }
-
-  /// تحقق يدوي لجدول kSupabasePendingDoctorsTable بدون الاعتماد فقط على
-  /// FormState للخطوات 1-2.
-  bool _validateStep1CustomTextIfNeeded() => true;
-
-  bool _validateStep2CustomTextIfNeeded() {
-    if (_governorate == 'البصرة' && _basraUseCustomArea) {
-      return _basraCustomAreaController.text.trim().length >= 2;
-    }
-    return true;
-  }
-
-  bool _validateContactFieldsForSupabase() {
-    if (_addressController.text.trim().length < 3) {
-      return false;
-    }
-    final String ph = _phController.text.trim();
-    if (ph.isEmpty || ph.length < 6) {
-      return false;
-    }
-    final String p2 = _ph2Controller.text.trim();
-    if (p2.isNotEmpty && p2.length < 6) {
-      return false;
-    }
-    if (_notesController.text.trim().length < 3) {
-      return false;
-    }
-    return true;
-  }
-
-  /// جاهزية الإرسال إلى [kSupabasePendingDoctorsTable].
-  bool _validateEntireClinicForPendingInsert() {
-    if (_nameController.text.trim().length < 2) {
-      return false;
-    }
-    if (!_validateStep1() || !_validateStep1CustomTextIfNeeded()) {
-      return false;
-    }
-    if (!_validateStep2() || !_validateStep2CustomTextIfNeeded()) {
-      return false;
-    }
-    if (!_validateContactFieldsForSupabase()) {
-      return false;
-    }
-    if (_pickedLatitude == null || _pickedLongitude == null) {
-      return false;
-    }
-    return true;
   }
 
   void _goNext() {
@@ -3811,77 +3755,131 @@ class _AddClinicPageState extends State<AddClinicPage> {
   }
 
   Future<void> _submit() async {
+    if (_isSubmitting) return;
+
+    // ── Specific validation with user-visible reason ───────────
     if (_pickedLatitude == null || _pickedLongitude == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'يجب تحديد موقع العيادة على الخريطة (الخطوة ٣) قبل الإرسال.',
-            ),
-          ),
-        );
+      _showError('يجب تحديد موقع العيادة على الخريطة (الخطوة ٣).');
+      return;
+    }
+    if (_nameController.text.trim().length < 2) {
+      _showError('يرجى إدخال اسم العيادة (الخطوة ١).');
+      return;
+    }
+    if (_medicalStoredSpec.trim().isEmpty || !_validateStep1()) {
+      _showError('يرجى اختيار التخصص الطبي (الخطوة ٢).');
+      return;
+    }
+    if (!_validateStep2()) {
+      if (_governorate == 'البصرة') {
+        _showError('يرجى اختيار منطقة البصرة (الخطوة ٣).');
+      } else {
+        _showError('يرجى كتابة اسم المنطقة (الخطوة ٣).');
       }
       return;
     }
-    if (!_validateEntireClinicForPendingInsert()) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'تأكد من إكمال الخطوات الأربع بشكل صحيح (الاسم، المجال، الموقع، بيانات التواصل) ثم أعد الإرسال.',
-            ),
-          ),
-        );
-      }
+    if (_addressController.text.trim().length < 3) {
+      _showError('يرجى إدخال عنوان العيادة (الخطوة ٤).');
       return;
     }
-    setState(() {
-      _isSubmitting = true;
-    });
+    if (_phController.text.trim().length < 6) {
+      _showError('يرجى إدخال رقم هاتف صحيح (الخطوة ٤).');
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
     try {
-      final String spec = _buildSpecForSubmit();
-      final String area = _buildAreaForSubmit();
-      final String notes = _buildNotesForSubmit();
-      final String textAddr = _addressController.text.trim();
-      final String ph2Text = _ph2Controller.text.trim();
+      final String spec  = _buildSpecForSubmit();
+      final String area  = _buildAreaForSubmit();
+      final String addr  = _addressController.text.trim();
+      final String notes = _notesController.text.trim();
+      final String ph2   = _ph2Controller.text.trim();
+
       final Map<String, dynamic> payload = <String, dynamic>{
-        'name': _nameController.text.trim(),
-        'spec': spec,
-        'addr': textAddr,
-        'area': area,
-        'ph': _phController.text.trim(),
-        'ph2': ph2Text,
+        'name' : _nameController.text.trim(),
+        'spec' : spec,
+        'addr' : addr,
+        'area' : area,
+        'ph'   : _phController.text.trim(),
+        'ph2'  : ph2,
         'notes': notes,
-        'gove': _governorate,
+        'gove' : _governorate,
         if (_selectedSpecializationId != null)
           'specialization_id': _selectedSpecializationId,
         ...DoctorCoordinates.supabasePair(
-          latitude: _pickedLatitude,
+          latitude:  _pickedLatitude,
           longitude: _pickedLongitude,
         ),
       };
-      await _supabase.from(kSupabasePendingDoctorsTable).insert(payload);
-      if (!mounted) {
-        return;
-      }
+
+      debugPrint('══════ AddClinic submit payload ══════');
+      debugPrint('name  : ${payload['name']}');
+      debugPrint('spec  : ${payload['spec']}');
+      debugPrint('gove  : ${payload['gove']}');
+      debugPrint('area  : ${payload['area']}');
+      debugPrint('addr  : ${payload['addr']}');
+      debugPrint('ph    : ${payload['ph']}');
+      debugPrint('lat   : ${payload['latitude']}');
+      debugPrint('lng   : ${payload['longitude']}');
+      debugPrint('══════════════════════════════════════');
+
+      await _supabase
+          .from(kSupabasePendingDoctorsTable)
+          .insert(payload);
+
+      debugPrint('✅ pending_doctors insert SUCCESS');
+
+      if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('تم إرسال الطلب بنجاح للمراجعة.')),
+        const SnackBar(
+          content: Text('✅ تم إرسال الطلب بنجاح! سيتم مراجعته من الإدارة.'),
+          backgroundColor: Color(0xFF10B981),
+          duration: Duration(seconds: 4),
+        ),
       );
       _resetForm();
-    } catch (error) {
-      if (!mounted) {
-        return;
+
+    } on PostgrestException catch (e) {
+      debugPrint('❌ PostgrestException: ${e.message}');
+      debugPrint('   code: ${e.code}');
+      debugPrint('   hint: ${e.hint}');
+      debugPrint('   details: ${e.details}');
+      if (!mounted) return;
+
+      String msg = 'تعذّر الإرسال.';
+      if (e.code == '42501' || e.message.contains('permission')) {
+        msg = 'خطأ في الصلاحيات (42501). تأكد من الاتصال بالإنترنت وحاول مجدداً.';
+      } else if (e.code == '23505') {
+        msg = 'هذه العيادة موجودة مسبقاً في قائمة الانتظار.';
+      } else if (e.code == '23502') {
+        msg = 'حقل مطلوب فارغ في قاعدة البيانات: ${e.details ?? e.message}';
+      } else if (e.message.isNotEmpty) {
+        msg = 'خطأ: ${e.message}';
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(humanReadableSupabaseWriteError(error))),
-      );
+      _showError(msg);
+
+    } catch (e, st) {
+      debugPrint('❌ Unknown error: $e');
+      debugPrint('$st');
+      if (!mounted) return;
+      _showError('خطأ غير متوقع: $e');
+
     } finally {
-      if (mounted) {
-        setState(() {
-          _isSubmitting = false;
-        });
-      }
+      if (mounted) setState(() => _isSubmitting = false);
     }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.red.shade700,
+        duration: const Duration(seconds: 5),
+      ),
+    );
   }
 
   void _resetForm() {
@@ -4297,17 +4295,10 @@ class _AddClinicPageState extends State<AddClinicPage> {
           const SizedBox(height: 10),
           TextFormField(
             controller: _notesController,
-            minLines: 3,
+            minLines: 2,
             maxLines: 6,
             textInputAction: TextInputAction.done,
-            decoration: _inputDecoration('ملاحظات *'),
-            autovalidateMode: AutovalidateMode.onUserInteraction,
-            validator: (String? v) {
-              if (v == null || v.trim().length < 3) {
-                return 'مطلوب';
-              }
-              return null;
-            },
+            decoration: _inputDecoration('ملاحظات إضافية (اختياري)'),
           ),
         ],
       ),
