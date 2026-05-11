@@ -236,43 +236,104 @@ class _ReportsManagementScreenState extends State<ReportsManagementScreen> {
       _showSnack('تعذر تحديد العيادة المستهدفة.');
       return;
     }
+
     try {
+      // ── Coordinates correction ───────────────────────────────
       final double? lat = DoctorCoordinates.readSuggestedLatitude(report);
       final double? lng = DoctorCoordinates.readSuggestedLongitude(report);
+
       if (lat != null && lng != null) {
-        await _supabase.rpc(
-          AppEndpoints.adminApplyCoordCorrection,
-          params: <String, dynamic>{
-            'p_report_id': report['id'],
-            'p_doctor_id': doctorId,
-            'p_lat': lat,
-            'p_lng': lng,
-          },
-        );
+        final List<dynamic> doctorUpdated = await _supabase
+            .from(_adminDoctorsEntityTable())
+            .update(<String, dynamic>{
+              'latitude' : lat,
+              'longitude': lng,
+            })
+            .eq('id', doctorId)
+            .select('id');
+
+        if (doctorUpdated.isEmpty) {
+          throw Exception(
+            'لم يتم تحديث إحداثيات الطبيب. '
+            'تحقق من صلاحيات UPDATE على جدول doctors.',
+          );
+        }
       } else {
+        // ── Text field correction ────────────────────────────
         final String field = resolveReportTargetColumn(report) ??
             _fieldForIssueType(report['info_issue_type']?.toString());
+
+        if (field.isEmpty) {
+          _showSnack('لا يمكن تحديد الحقل تلقائياً. استخدم «تعديل يدوي».');
+          return;
+        }
+
+        if (!_kAdminUpdatableDoctorColumns.contains(field)) {
+          _showSnack(
+            'الحقل «$field» غير مسموح بتحديثه. '
+            'استخدم «تعديل يدوي» أو وسّع صلاحيات anon.',
+          );
+          return;
+        }
+
         final String newValue =
             (report['suggested_correction'] ?? '').toString().trim();
-        await _supabase.rpc(
-          AppEndpoints.adminApplyReportCorrection,
-          params: <String, dynamic>{
-            'p_report_id': report['id'],
-            'p_doctor_id': doctorId,
-            'p_field_name': field,
-            'p_new_value': newValue,
-          },
+
+        if (newValue.isEmpty) {
+          _showSnack('الاقتراح لا يتضمن قيمة جديدة. استخدم «تعديل يدوي».');
+          return;
+        }
+
+        final List<dynamic> doctorUpdated = await _supabase
+            .from(_adminDoctorsEntityTable())
+            .update(<String, dynamic>{field: newValue})
+            .eq('id', doctorId)
+            .select('id');
+
+        if (doctorUpdated.isEmpty) {
+          throw Exception(
+            'لم يتم تحديث بيانات الطبيب. '
+            'تحقق من صلاحيات UPDATE على جدول doctors.',
+          );
+        }
+      }
+
+      // ── Mark report as resolved ──────────────────────────────
+      final List<dynamic> reportUpdated = await _supabase
+          .from(_adminReportsTable())
+          .update(<String, dynamic>{'status': _kReportStatusResolved})
+          .eq('id', report['id'])
+          .eq('status', _kReportStatusPending)
+          .select('id');
+
+      if (reportUpdated.isEmpty) {
+        debugPrint(
+          'Warning: report ${report['id']} status not changed '
+          '(already resolved or missing permission).',
         );
       }
+
       await _syncReportTotal(doctorId);
+
       if (!mounted) return;
-      _showSnack('تم تطبيق التصحيح بنجاح');
+      _showSnack('✅ تم تطبيق التصحيح بنجاح.');
       await _loadReports();
+
+    } on PostgrestException catch (e) {
+      debugPrint(
+          '_applyDirectCorrection PostgrestException: ${e.message} code=${e.code}');
+      _showSnack(
+        'فشل التطبيق (${e.code}): ${e.message}. '
+        'تحقق من صلاحيات UPDATE على جدول doctors.',
+      );
     } catch (error) {
-      _showSnack('فشل التطبيق المباشر: $error');
+      debugPrint('_applyDirectCorrection error: $error');
+      _showSnack('فشل التطبيق: $error');
     }
   }
 
+  // Kept for richer approval flow (map + column guards); primary action uses RPC path.
+  // ignore: unused_element
   Future<void> _approveReport(Map<String, dynamic> r) async {
     final int? docId = _adminReportTargetId(r);
     if (docId == null) {
@@ -675,79 +736,539 @@ class _ReportsManagementScreenState extends State<ReportsManagementScreen> {
     return _kInfoCorrectionTypeLabels[key] ?? key;
   }
 
-  Widget _buildReportRowCard(Map<String, dynamic> r) {
-    final String type = _infoTypeLabelAr(r['info_issue_type']?.toString());
-    final String name = (r['doctor_name'] as String?)?.trim() ?? '';
-    final String namePart = name.isNotEmpty ? ' — $name' : '';
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          ListTile(
-            isThreeLine: true,
-            leading: Icon(
-              type.contains('الهاتف')
-                  ? Icons.phone
-                  : type.contains('العنوان')
-                      ? Icons.place
-                      : type.contains('موقع')
-                          ? Icons.map_outlined
-                          : Icons.person,
-              color: const Color(0xFF1D3557),
-            ),
-            title: Text(
-              'id: ${_adminReportTargetId(r) ?? ''}$namePart',
-              style: const TextStyle(
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF1D3557),
-                fontSize: 14,
-              ),
-            ),
-            subtitle: Text(
-              '$type\n'
-              'الخطأ: ${r['error_location']}\n'
-              'التصحيح المقترح: ${r['suggested_correction']}',
-              style: const TextStyle(fontSize: 12, height: 1.35),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsetsDirectional.only(start: 8, end: 8, bottom: 8),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () => _applyDirectCorrection(r),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF2E7D32),
+  Future<void> _showReportDetailSheet(Map<String, dynamic> report) async {
+    final int? doctorId = _adminReportTargetId(report);
+
+    Map<String, dynamic>? currentDoctor;
+    if (doctorId != null) {
+      try {
+        final List<dynamic> res = await _supabase
+            .from(_adminDoctorsEntityTable())
+            .select('id, name, spec, addr, area, ph, ph2, notes, gove')
+            .eq('id', doctorId)
+            .limit(1);
+        if (res.isNotEmpty) {
+          currentDoctor = res.first as Map<String, dynamic>;
+        }
+      } catch (e) {
+        debugPrint('_showReportDetailSheet fetch doctor: $e');
+      }
+    }
+
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext ctx) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: DraggableScrollableSheet(
+            initialChildSize: 0.75,
+            minChildSize: 0.5,
+            maxChildSize: 0.95,
+            expand: false,
+            builder: (_, ScrollController scrollCtrl) {
+              return Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                child: Column(
+                  children: <Widget>[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12, bottom: 8),
+                      child: Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade300,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
                     ),
-                    icon: const Icon(Icons.check_circle_outline, size: 18),
-                    label: const Text('تطبيق مباشر'),
-                  ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 4),
+                      child: Row(
+                        children: <Widget>[
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1D3557)
+                                  .withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(
+                              Icons.edit_note_rounded,
+                              color: Color(0xFF1D3557),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                const Text(
+                                  'تفاصيل اقتراح التعديل',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF1D3557),
+                                  ),
+                                ),
+                                if (doctorId != null)
+                                  Text(
+                                    'رقم الطبيب: $doctorId',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF64748B),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView(
+                        controller: scrollCtrl,
+                        padding: const EdgeInsets.all(20),
+                        children: <Widget>[
+                          if (currentDoctor != null) ...<Widget>[
+                            _sectionHeader('البيانات الحالية للطبيب',
+                                color: const Color(0xFF1976D2)),
+                            _detailTable(<Map<String, String>>[
+                              <String, String>{
+                                'label': 'الاسم',
+                                'value': (currentDoctor['name'] ?? '—')
+                                    .toString(),
+                              },
+                              <String, String>{
+                                'label': 'التخصص',
+                                'value': (currentDoctor['spec'] ?? '—')
+                                    .toString(),
+                              },
+                              <String, String>{
+                                'label': 'المحافظة',
+                                'value': (currentDoctor['gove'] ?? '—')
+                                    .toString(),
+                              },
+                              <String, String>{
+                                'label': 'المنطقة',
+                                'value': (currentDoctor['area'] ?? '—')
+                                    .toString(),
+                              },
+                              <String, String>{
+                                'label': 'العنوان',
+                                'value': (currentDoctor['addr'] ?? '—')
+                                    .toString(),
+                              },
+                              <String, String>{
+                                'label': 'الهاتف 1',
+                                'value': (currentDoctor['ph'] ?? '—')
+                                    .toString(),
+                              },
+                              <String, String>{
+                                'label': 'الهاتف 2',
+                                'value': (currentDoctor['ph2'] ?? '—')
+                                    .toString(),
+                              },
+                            ]),
+                            const SizedBox(height: 16),
+                          ],
+                          _sectionHeader('تفاصيل الاقتراح المُرسَل',
+                              color: const Color(0xFFE65100)),
+                          _detailTable(<Map<String, String>>[
+                            <String, String>{
+                              'label': 'نوع الخطأ',
+                              'value': _infoTypeLabelAr(
+                                  report['info_issue_type']?.toString()),
+                            },
+                            <String, String>{
+                              'label': 'موضع الخطأ',
+                              'value': (report['error_location'] ?? '—')
+                                  .toString(),
+                            },
+                            <String, String>{
+                              'label': 'التصحيح المقترح',
+                              'value':
+                                  (report['suggested_correction'] ?? '—')
+                                      .toString(),
+                              'highlight': 'true',
+                            },
+                            if (report['field_name'] != null)
+                              <String, String>{
+                                'label': 'الحقل المستهدف',
+                                'value': report['field_name'].toString(),
+                              },
+                            <String, String>{
+                              'label': 'تاريخ الاقتراح',
+                              'value': _formatDate(
+                                  report['created_at']?.toString()),
+                            },
+                          ]),
+                          const SizedBox(height: 24),
+                          FilledButton.icon(
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              _applyDirectCorrection(report);
+                            },
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF2E7D32),
+                              minimumSize: const Size(double.infinity, 48),
+                            ),
+                            icon: const Icon(Icons.check_circle_outline),
+                            label: const Text('تطبيق مباشر'),
+                          ),
+                          const SizedBox(height: 10),
+                          OutlinedButton.icon(
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              _applyReportCorrection(report);
+                            },
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size(double.infinity, 48),
+                            ),
+                            icon: const Icon(Icons.tune),
+                            label: const Text('تعديل يدوي'),
+                          ),
+                          const SizedBox(height: 10),
+                          OutlinedButton.icon(
+                            onPressed: () {
+                              Navigator.of(ctx).pop();
+                              _deleteReport(report);
+                            },
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red,
+                              minimumSize: const Size(double.infinity, 48),
+                            ),
+                            icon: const Icon(Icons.delete_outline),
+                            label: const Text('حذف الاقتراح'),
+                          ),
+                          const SizedBox(height: 20),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => _applyReportCorrection(r),
-                    icon: const Icon(Icons.tune, size: 18),
-                    label: const Text('تعديل يدوي'),
-                  ),
-                ),
-              ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _sectionHeader(String title,
+      {Color color = const Color(0xFF1D3557)}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 4,
+            height: 18,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(2),
             ),
           ),
-          Padding(
-            padding: const EdgeInsetsDirectional.only(start: 8, end: 8, bottom: 8),
-            child: OutlinedButton.icon(
-              onPressed: () => _deleteReport(r),
-              icon: const Icon(Icons.delete_outline, size: 18),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.red,
-              ),
-              label: const Text('حذف'),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              color: color,
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _detailTable(List<Map<String, String>> rows) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        children: rows.asMap().entries.map(
+          (MapEntry<int, Map<String, String>> entry) {
+            final bool isLast = entry.key == rows.length - 1;
+            final bool highlight = entry.value['highlight'] == 'true';
+            return Container(
+              decoration: BoxDecoration(
+                color: highlight
+                    ? const Color(0xFFFFF3E0)
+                    : Colors.transparent,
+                borderRadius: isLast
+                    ? const BorderRadius.vertical(
+                        bottom: Radius.circular(12))
+                    : null,
+              ),
+              child: Column(
+                children: <Widget>[
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        SizedBox(
+                          width: 90,
+                          child: Text(
+                            entry.value['label'] ?? '',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF64748B),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            entry.value['value'] ?? '—',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: highlight
+                                  ? FontWeight.w800
+                                  : FontWeight.w500,
+                              color: highlight
+                                  ? const Color(0xFFE65100)
+                                  : const Color(0xFF1E293B),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!isLast)
+                    const Divider(height: 1, color: Color(0xFFE2E8F0)),
+                ],
+              ),
+            );
+          },
+        ).toList(),
+      ),
+    );
+  }
+
+  String _formatDate(String? raw) {
+    if (raw == null || raw.isEmpty) return '—';
+    try {
+      final DateTime dt = DateTime.parse(raw).toLocal();
+      return '${dt.year}/${dt.month.toString().padLeft(2, '0')}/'
+          '${dt.day.toString().padLeft(2, '0')} '
+          '${dt.hour.toString().padLeft(2, '0')}:'
+          '${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  Widget _buildReportRowCard(Map<String, dynamic> r) {
+    final String type =
+        _infoTypeLabelAr(r['info_issue_type']?.toString());
+    final String name = (r['doctor_name'] as String?)?.trim() ?? '';
+    final String correction =
+        (r['suggested_correction'] ?? '').toString().trim();
+    final String doctorIdStr =
+        (_adminReportTargetId(r) ?? '—').toString();
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: Color(0xFFE2E8F0)),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => _showReportDetailSheet(r),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            // ── Card header ────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+              child: Row(
+                children: <Widget>[
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1D3557).withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(
+                      type.contains('الهاتف')
+                          ? Icons.phone_outlined
+                          : type.contains('العنوان')
+                              ? Icons.place_outlined
+                              : type.contains('موقع')
+                                  ? Icons.map_outlined
+                                  : type.contains('الاسم')
+                                      ? Icons.person_outline
+                                      : Icons.edit_note_rounded,
+                      color: const Color(0xFF1D3557),
+                      size: 20,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Row(
+                          children: <Widget>[
+                            Text(
+                              'طبيب #$doctorIdStr',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF1D3557),
+                                fontSize: 13,
+                              ),
+                            ),
+                            if (name.isNotEmpty) ...<Widget>[
+                              const Text(
+                                ' — ',
+                                style: TextStyle(color: Color(0xFF94A3B8)),
+                              ),
+                              Expanded(
+                                child: Text(
+                                  name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    color: Color(0xFF1D3557),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFE3F2FD),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            type,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF1565C0),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(
+                    Icons.chevron_left_rounded,
+                    color: Color(0xFFCBD5E1),
+                    size: 20,
+                  ),
+                ],
+              ),
+            ),
+            // ── Suggested correction preview ───────────────────
+            if (correction.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 14),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF8E1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFFFE082)),
+                ),
+                child: Row(
+                  children: <Widget>[
+                    const Icon(Icons.lightbulb_outline_rounded,
+                        size: 14, color: Color(0xFFE65100)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        correction,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFFE65100),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 10),
+            // ── Action buttons ─────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () => _applyDirectCorrection(r),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF2E7D32),
+                        padding:
+                            const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                      icon: const Icon(Icons.check_circle_outline,
+                          size: 16),
+                      label: const Text('تطبيق',
+                          style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _applyReportCorrection(r),
+                      style: OutlinedButton.styleFrom(
+                        padding:
+                            const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                      icon: const Icon(Icons.tune, size: 16),
+                      label: const Text('يدوي',
+                          style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    onPressed: () => _deleteReport(r),
+                    icon: const Icon(Icons.delete_outline_rounded,
+                        color: Colors.red, size: 20),
+                    tooltip: 'حذف',
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.red.shade50,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
