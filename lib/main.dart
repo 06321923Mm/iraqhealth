@@ -281,23 +281,23 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   /// Set to true once the governorate has been chosen (first-launch or restored).
   bool _governoratePickerDone = false;
 
-  /// Number of doctors shown immediately on first paint.
-  static const int _firstPageSize = 20;
-  /// Subsequent background pages.
-  static const int _batchSize = 100;
-  /// True while background pages are still loading.
-  bool _isLoadingMore = false;
+  static const int _firstPageSize = 30;
+  static const int _pagingSize    = 50;
 
-  int _lastFetchedId = 0;
-  int _lastFetchedOffset = 0;
-  bool _hasMore = true;
-  bool _isFetchingPage = false;
-  bool _useKeysetPagination = true;
+  // ── Pagination state ──────────────────────────────────────────
+  int     _lastFetchedId     = 0;
+  int     _lastFetchedOffset = 0;
+  bool    _hasMore           = true;
+  bool    _isFetchingPage    = false;
+  bool    _isLoadingMore     = false;
+  bool    _useKeysetRpc      = true;
+
+  // ── Scroll controller ─────────────────────────────────────────
   final ScrollController _listScrollController = ScrollController();
 
   /// Start time for [logLoadTime] (set in [_loadDoctors]).
   DateTime? _doctorLoadStartedAt;
-  bool _loadUsedCacheHit = false;
+  final bool _loadUsedCacheHit = false;
 
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
@@ -349,7 +349,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     super.initState();
     CrashlyticsService.instance
         .setScreen('home_${_selectedGovernorate ?? 'default'}');
-    _listScrollController.addListener(_onScroll);
+    _listScrollController.addListener(_onListScroll);
     _searchController.addListener(_onSearchTextChanged);
     _searchFocusNode.addListener(_onSearchFocusChanged);
     // Rebuild when auth state flips so the "عيادتي" tab and admin-only
@@ -467,65 +467,117 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   Future<void> _loadDoctors() async {
-    final String gove = _selectedGovernorate ?? 'البصرة';
-    _doctorLoadStartedAt = DateTime.now();
-    _loadUsedCacheHit = false;
+    // Reset everything for a fresh governorate load.
+    _lastFetchedId     = 0;
+    _lastFetchedOffset = 0;
+    _hasMore           = true;
+    _useKeysetRpc      = true;
+    _activeFilterKey   = null;
+
     setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-      _isCachedData = false;
-      _cacheTimestamp = null;
-      _showOfflineBanner = false;
-      _showRetryButton = false;
-      _allDoctors = <Doctor>[];
+      _isLoading       = true;
+      _errorMessage    = null;
+      _isCachedData    = false;
+      _cacheTimestamp  = null;
+      _allDoctors      = <Doctor>[];
       _filteredDoctors = <Doctor>[];
-      _areas = <String>[];
+      _areas           = <String>[];
       _specializations = <String>[];
-      _allKnownSpecs = <String>{};
-      _allKnownAreas = <String>{};
+      _selectedArea            = null;
+      _selectedSpecialization  = null;
     });
 
-    // Kick off the filter fetch independently — doesn't block doctor loading.
-    unawaited(_fetchDistinctFilters(gove));
+    final String gove = _selectedGovernorate ?? 'البصرة';
 
-    // 1. Cache-first: Hive, then legacy SharedPreferences (migrate to Hive).
-    List<Map<String, dynamic>>? cached =
-        await HiveCacheService.getCachedDoctors(gove);
-
-    if (cached == null || cached.isEmpty) {
-      final List<Map<String, dynamic>>? spCached = await SpDoctorsCache.load(gove);
-      if (spCached != null && spCached.isNotEmpty) {
-        cached = spCached;
-        unawaited(HiveCacheService.cacheDoctors(spCached, gove));
-        unawaited(SpDoctorsCache.clear(gove));
+    // ── 1. Try cache first (Hive, then legacy SP) ────────────────
+    try {
+      List<Map<String, dynamic>>? cached =
+          await HiveCacheService.getCachedDoctors(gove);
+      if (cached == null || cached.isEmpty) {
+        final List<Map<String, dynamic>>? spCached =
+            await SpDoctorsCache.load(gove);
+        if (spCached != null && spCached.isNotEmpty) {
+          cached = spCached;
+          unawaited(HiveCacheService.cacheDoctors(spCached, gove));
+          unawaited(SpDoctorsCache.clear(gove));
+        }
       }
+      if (cached != null && cached.isNotEmpty) {
+        final List<Doctor> cachedDoctors = cached
+            .map((Map<String, dynamic> j) => Doctor.fromJson(j))
+            .toList();
+        if (mounted) {
+          setState(() {
+            _allDoctors    = cachedDoctors;
+            _isCachedData  = true;
+            _isLoading     = false;
+            _hasMore       = true;
+            _lastFetchedId = cachedDoctors.isNotEmpty
+                ? cachedDoctors.last.id
+                : 0;
+          });
+          _rebuildFiltersFromAllDoctors(gove);
+          _applyFilters();
+        }
+        // Always refresh in background.
+        unawaited(_backgroundFirstPage(gove));
+        unawaited(_fetchFiltersForGovernorate(gove));
+        return;
+      }
+    } catch (_) {}
+
+    // ── 2. Check connectivity ────────────────────────────────────
+    final bool online = await ConnectivityService.isOnline();
+    if (!online) {
+      if (mounted) {
+        setState(() {
+          _isLoading    = false;
+          _errorMessage = 'لا يوجد اتصال بالإنترنت ولا توجد بيانات محفوظة.';
+        });
+      }
+      return;
     }
 
-    final bool cacheHit = cached != null && cached.isNotEmpty;
-    final int cachedCount = cached?.length ?? 0;
-    final String goveKey = gove.replaceAll(' ', '_');
-    CrashlyticsService.instance.setCustomKey(
-      'cache_hit_$goveKey',
-      cacheHit ? 'hit' : 'miss',
-    );
-    CrashlyticsService.instance.setCustomKey(
-      'cached_count_$goveKey',
-      cachedCount,
-    );
+    // ── 3. Fetch first page from network ─────────────────────────
+    try {
+      final List<dynamic> firstPage = await _fetchPage(
+        gove,
+        limit: _firstPageSize,
+        lastId: 0,
+        offset: 0,
+      );
 
-    if (cached != null && cached.isNotEmpty) {
-      _loadUsedCacheHit = true;
       if (!mounted) return;
-      _allDoctors = cached
-          .map((Map<String, dynamic> json) => Doctor.fromJson(json))
+
+      final List<Doctor> doctors = firstPage
+          .map((dynamic j) =>
+              Doctor.fromJson(j as Map<String, dynamic>))
           .toList();
+
+      _updateCursorAfterPage(firstPage);
+
+      setState(() {
+        _allDoctors = doctors;
+        _isLoading  = false;
+        _hasMore    = firstPage.length >= _firstPageSize;
+      });
+
       _rebuildFiltersFromAllDoctors(gove);
       _applyFilters();
-      setState(() => _isLoading = false);
+      unawaited(_fetchFiltersForGovernorate(gove));
+      unawaited(HiveCacheService.cacheDoctors(
+          firstPage.cast<Map<String, dynamic>>(), gove));
+    } catch (error, stackTrace) {
+      debugPrint('_loadDoctors error: $error');
+      CrashlyticsService.instance.logApiFailure(
+          AppEndpoints.getDoctorsPageKeyset, error, stackTrace);
+      if (mounted) {
+        setState(() {
+          _isLoading    = false;
+          _errorMessage = _humanReadableLoadError(error);
+        });
+      }
     }
-
-    // 2. Always trigger a background network refresh, whether cache hit or not.
-    unawaited(_backgroundRefresh(gove, forceRefresh: true));
   }
 
   Future<void> _backgroundRefresh(
@@ -544,7 +596,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     _lastFetchedId = 0;
     _lastFetchedOffset = 0;
     _hasMore = true;
-    _useKeysetPagination = true;
+    _useKeysetRpc = true;
 
     try {
       final bool online = await ConnectivityService.isOnline();
@@ -578,7 +630,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         firstPage = raw is List ? raw : <dynamic>[];
       } catch (keysetErr, keysetSt) {
         debugPrint('Keyset RPC unavailable, using range fallback: $keysetErr\n$keysetSt');
-        _useKeysetPagination = false;
+        _useKeysetRpc = false;
         firstPage = await _supabase
             .from(kSupabaseDoctorsTable)
             .select(_kDoctorListSelectMinimal)
@@ -604,7 +656,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       }
 
       // Update cursor after first page.
-      if (_useKeysetPagination) {
+      if (_useKeysetRpc) {
         final dynamic lastRaw = (firstPage.last as Map<String, dynamic>)['id'];
         _lastFetchedId = lastRaw is int
             ? lastRaw
@@ -681,11 +733,13 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     }
   }
 
-  void _onScroll() {
-    if (!_hasMore || _isFetchingPage || _isLoadingMore) return;
-    final double maxScroll = _listScrollController.position.maxScrollExtent;
-    final double currentScroll = _listScrollController.position.pixels;
-    if (currentScroll >= maxScroll - 300) {
+  void _onListScroll() {
+    if (!_hasMore || _isFetchingPage || _isFilterFetching) return;
+    final double maxScroll =
+        _listScrollController.position.maxScrollExtent;
+    final double current =
+        _listScrollController.position.pixels;
+    if (current >= maxScroll - 350) {
       _fetchNextPage();
     }
   }
@@ -700,25 +754,25 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     try {
       List<dynamic> response;
 
-      if (_useKeysetPagination) {
+      if (_useKeysetRpc) {
         try {
           final dynamic raw = await _supabase.rpc(
             AppEndpoints.getDoctorsPageKeyset,
             params: <String, dynamic>{
               'p_gove': gove,
-              'p_limit': _batchSize,
+              'p_limit': _pagingSize,
               'p_last_id': _lastFetchedId,
             },
           );
           response = raw is List ? raw : <dynamic>[];
         } catch (_) {
-          _useKeysetPagination = false;
+          _useKeysetRpc = false;
           response = await _supabase
               .from(kSupabaseDoctorsTable)
               .select(_kDoctorListSelectMinimal)
               .eq('gove', gove)
               .order('id', ascending: true)
-              .range(_lastFetchedOffset, _lastFetchedOffset + _batchSize - 1);
+              .range(_lastFetchedOffset, _lastFetchedOffset + _pagingSize - 1);
         }
       } else {
         response = await _supabase
@@ -726,7 +780,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             .select(_kDoctorListSelectMinimal)
             .eq('gove', gove)
             .order('id', ascending: true)
-            .range(_lastFetchedOffset, _lastFetchedOffset + _batchSize - 1);
+            .range(_lastFetchedOffset, _lastFetchedOffset + _pagingSize - 1);
       }
 
       if (!mounted) return;
@@ -736,7 +790,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         return;
       }
 
-      if (_useKeysetPagination) {
+      if (_useKeysetRpc) {
         final dynamic lastRaw =
             (response.last as Map<String, dynamic>)['id'];
         _lastFetchedId = lastRaw is int
@@ -752,7 +806,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
       setState(() {
         _allDoctors = List<Doctor>.from(_allDoctors)..addAll(newDoctors);
-        if (response.length < _batchSize) _hasMore = false;
+        if (response.length < _pagingSize) _hasMore = false;
       });
 
       _rebuildFiltersFromAllDoctors(gove);
@@ -767,6 +821,95 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     } finally {
       if (mounted) setState(() { _isFetchingPage = false; _isLoadingMore = false; });
     }
+  }
+
+  // ── Pagination helpers ────────────────────────────────────────
+
+  Future<List<dynamic>> _fetchPage(
+    String gove, {
+    required int limit,
+    required int lastId,
+    required int offset,
+    String? filterSpec,
+    String? filterArea,
+  }) async {
+    // Filtered queries always use plain REST (keyset RPC has no filter params).
+    if (filterSpec != null || filterArea != null) {
+      var q = _supabase
+          .from(kSupabaseDoctorsTable)
+          .select(_kDoctorListSelectMinimal)
+          .eq('gove', gove);
+      if (filterSpec != null) q = q.eq('spec', filterSpec);
+      if (filterArea  != null) q = q.eq('area', filterArea);
+      return q.order('id', ascending: true).range(offset, offset + limit - 1);
+    }
+
+    // Unfiltered — keyset RPC with range fallback.
+    if (_useKeysetRpc) {
+      try {
+        final dynamic raw = await _supabase.rpc(
+          AppEndpoints.getDoctorsPageKeyset,
+          params: <String, dynamic>{
+            'p_gove'   : gove,
+            'p_limit'  : limit,
+            'p_last_id': lastId,
+          },
+        );
+        return raw is List ? raw : <dynamic>[];
+      } catch (_) {
+        _useKeysetRpc = false;
+      }
+    }
+
+    return _supabase
+        .from(kSupabaseDoctorsTable)
+        .select(_kDoctorListSelectMinimal)
+        .eq('gove', gove)
+        .order('id', ascending: true)
+        .range(offset, offset + limit - 1);
+  }
+
+  void _updateCursorAfterPage(List<dynamic> page) {
+    if (page.isEmpty) return;
+    final dynamic lastRaw =
+        (page.last as Map<String, dynamic>)['id'];
+    _lastFetchedId = lastRaw is int
+        ? lastRaw
+        : int.tryParse(lastRaw?.toString() ?? '') ?? _lastFetchedId;
+    _lastFetchedOffset += page.length;
+  }
+
+  Future<void> _backgroundFirstPage(String gove) async {
+    try {
+      final List<dynamic> firstPage = await _fetchPage(
+        gove,
+        limit: _firstPageSize,
+        lastId: 0,
+        offset: 0,
+      );
+      if (!mounted) return;
+      if (firstPage.isEmpty) return;
+
+      final List<Doctor> doctors = firstPage
+          .map((dynamic j) =>
+              Doctor.fromJson(j as Map<String, dynamic>))
+          .toList();
+
+      _lastFetchedId     = 0;
+      _lastFetchedOffset = 0;
+      _updateCursorAfterPage(firstPage);
+
+      setState(() {
+        _allDoctors    = doctors;
+        _isCachedData  = false;
+        _hasMore       = firstPage.length >= _firstPageSize;
+        _lastSyncTime  = DateTime.now();
+      });
+      _rebuildFiltersFromAllDoctors(gove);
+      _applyFilters();
+      unawaited(HiveCacheService.cacheDoctors(
+          firstPage.cast<Map<String, dynamic>>(), gove));
+    } catch (_) {}
   }
 
   /// Fetches results for the active spec/area filter directly from Supabase
@@ -830,7 +973,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   /// Called immediately when a governorate is selected — does NOT wait for
   /// the paginated doctor list. Tries the [AppEndpoints.getDoctorsFilters]
   /// RPC first; falls back to a direct two-column select if unavailable.
-  Future<void> _fetchDistinctFilters(String gove) async {
+  Future<void> _fetchFiltersForGovernorate(String gove) async {
     try {
       List<dynamic> rows;
       try {
@@ -863,7 +1006,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       });
       _rebuildFiltersFromAllDoctors(gove);
     } catch (e) {
-      debugPrint('_fetchDistinctFilters error: $e');
+      debugPrint('_fetchFiltersForGovernorate error: $e');
     }
   }
 
@@ -1923,8 +2066,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     _authStateSub = null;
     _connectivitySub?.cancel();
     _connectivitySub = null;
-    _listScrollController.removeListener(_onScroll);
-    _listScrollController.dispose();
+    _listScrollController
+      ..removeListener(_onListScroll)
+      ..dispose();
     _searchController.removeListener(_onSearchTextChanged);
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
@@ -2905,7 +3049,7 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                           _hasMore = true;
                           _isFetchingPage = false;
                           _isLoadingMore = false;
-                          _useKeysetPagination = true;
+                          _useKeysetRpc = true;
                         });
                         SharedPreferences.getInstance().then(
                           (SharedPreferences p) => p.setString(
