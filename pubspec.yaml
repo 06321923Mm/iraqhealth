@@ -64,10 +64,10 @@ dependencies:
   dio: ^5.9.2
   permission_handler: ^12.0.1
   hive_flutter: ^1.1.0
-  flutter_image_compress: ^2.3.0
+  flutter_image_compress: ^2.4.0
   blurhash_dart: ^1.2.1
-  flutter_blurhash: ^0.8.2
-  image: ^4.2.0
+  flutter_blurhash: ^0.9.1
+  image: ^4.8.0
 
 dev_dependencies:
   flutter_test:

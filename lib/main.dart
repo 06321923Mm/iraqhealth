@@ -6,6 +6,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:flutter/material.dart';
@@ -33,7 +34,6 @@ import 'widgets/doctor_map_location_field.dart';
 import 'widgets/medical_category_selector.dart';
 import 'arabic_search_normalize.dart';
 import 'favorites_provider.dart';
-import 'search_suggestions.dart';
 import 'firebase_options.dart';
 import 'pwa_install_stub.dart'
     if (dart.library.js) 'pwa_install_web.dart';
@@ -43,8 +43,11 @@ import 'edit_suggestion/schema_models.dart';
 import 'widgets/doctor_list_skeleton.dart';
 import 'widgets/dynamic_edit_suggestion_form.dart';
 import 'features/admin/presentation/layouts/admin_layout.dart';
+import 'features/onboarding/governorate_picker_screen.dart';
 import 'services/auth_service.dart';
+import 'theme/app_theme.dart';
 import 'services/fcm_token_service.dart';
+import 'services/performance_service.dart';
 import 'core/cache/connectivity_service.dart';
 import 'core/cache/hive_cache_service.dart';
 import 'core/cache/sp_doctors_cache.dart';
@@ -153,6 +156,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await AppEnv.loadAppEnv();
+  AppEnv.assertConfigured();
 
   if (!kIsWeb) {
     await Firebase.initializeApp(
@@ -204,29 +208,16 @@ class IraqHealthApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const Color primaryMedicalBlue = Color(0xFF42A5F5);
-    const Color softBackground = Color(0xFFF7FBFF);
-
-    return MaterialApp(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+      ),
+      child: MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'المدار الطبي',
-      theme: ThemeData(
-        useMaterial3: true,
-        textTheme: GoogleFonts.cairoTextTheme(),
-        fontFamily: GoogleFonts.cairo().fontFamily,
-        scaffoldBackgroundColor: softBackground,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: primaryMedicalBlue,
-          primary: primaryMedicalBlue,
-          surface: Colors.white,
-        ),
-        pageTransitionsTheme: const PageTransitionsTheme(
-          builders: <TargetPlatform, PageTransitionsBuilder>{
-            TargetPlatform.android: CupertinoPageTransitionsBuilder(),
-            TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-          },
-        ),
-      ),
+      theme: buildAppTheme(),
       onGenerateRoute: (RouteSettings settings) {
         if (settings.name == '/home') {
           return PageRouteBuilder<dynamic>(
@@ -274,6 +265,7 @@ class IraqHealthApp extends StatelessWidget {
         textDirection: TextDirection.rtl,
         child: AuthGate(),
       ),
+    ),
     );
   }
 }
@@ -286,7 +278,26 @@ class IraqHealthHomePage extends StatefulWidget {
 }
 
 class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
-  static const int _batchSize = 1000;
+  /// Set to true once the governorate has been chosen (first-launch or restored).
+  bool _governoratePickerDone = false;
+
+  /// Number of doctors shown immediately on first paint.
+  static const int _firstPageSize = 20;
+  /// Subsequent background pages.
+  static const int _batchSize = 100;
+  /// True while background pages are still loading.
+  bool _isLoadingMore = false;
+
+  int _lastFetchedId = 0;
+  int _lastFetchedOffset = 0;
+  bool _hasMore = true;
+  bool _isFetchingPage = false;
+  bool _useKeysetPagination = true;
+  final ScrollController _listScrollController = ScrollController();
+
+  /// Start time for [logLoadTime] (set in [_loadDoctors]).
+  DateTime? _doctorLoadStartedAt;
+  bool _loadUsedCacheHit = false;
 
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
@@ -303,23 +314,29 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   bool _showOfflineBanner = false;
   bool _showRetryButton = false;
-  DateTime? _lastSyncTime;
   bool _isRefreshing = false;
+  DateTime? _lastSyncTime;
 
   List<Doctor> _allDoctors = <Doctor>[];
   List<Doctor> _filteredDoctors = <Doctor>[];
   List<String> _areas = <String>[];
   List<String> _specializations = <String>[];
+  /// Full distinct sets for the current governorate, fetched independently
+  /// of the paginated doctor list so chips are complete from the first load.
+  Set<String> _allKnownSpecs = <String>{};
+  Set<String> _allKnownAreas = <String>{};
+
+  bool _isFilterFetching = false;
+  /// Unique key for the in-flight filter fetch; used to discard stale responses.
+  String? _activeFilterKey;
   int _adminTapCounter = 0;
   Timer? _adminTapResetTimer;
 
   /// 0: الرئيسية، 1: أطبائي (المفضلة).
   int _homeNavIndex = 0;
-  Timer? _suggestionDebounceTimer;
   Timer? _searchAnalyticsDebounceTimer;
   StreamSubscription<AuthState>? _authStateSub;
   StreamSubscription<bool>? _connectivitySub;
-  List<SearchSuggestionRow> _searchSuggestions = <SearchSuggestionRow>[];
 
   static const List<String> _kPopularSearchSpecs = <String>[
     'القلبية',
@@ -330,6 +347,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   @override
   void initState() {
     super.initState();
+    CrashlyticsService.instance
+        .setScreen('home_${_selectedGovernorate ?? 'default'}');
+    _listScrollController.addListener(_onScroll);
     _searchController.addListener(_onSearchTextChanged);
     _searchFocusNode.addListener(_onSearchFocusChanged);
     // Rebuild when auth state flips so the "عيادتي" tab and admin-only
@@ -349,9 +369,25 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       await _showDisclaimerIfNeeded();
       if (mounted) _checkForUpdate();
     });
-    _loadDoctors();
+    _initGovernorate();
     // Register FCM token for push notifications (fire-and-forget, non-fatal).
     FcmTokenService.register().ignore();
+  }
+
+  Future<void> _initGovernorate() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final String? saved = prefs.getString(kPrefSelectedGovernorate);
+    if (saved != null && saved.isNotEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _selectedGovernorate = saved;
+        _governoratePickerDone = true;
+      });
+      _loadDoctors();
+    } else {
+      if (!mounted) return;
+      setState(() => _governoratePickerDone = false);
+    }
   }
 
   Future<void> _checkForUpdate() async {
@@ -432,6 +468,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   Future<void> _loadDoctors() async {
     final String gove = _selectedGovernorate ?? 'البصرة';
+    _doctorLoadStartedAt = DateTime.now();
+    _loadUsedCacheHit = false;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -443,11 +481,40 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       _filteredDoctors = <Doctor>[];
       _areas = <String>[];
       _specializations = <String>[];
+      _allKnownSpecs = <String>{};
+      _allKnownAreas = <String>{};
     });
 
-    // 1. Cache-first: serve from SpDoctorsCache immediately (no spinner).
-    final List<Map<String, dynamic>>? cached = await SpDoctorsCache.load(gove);
+    // Kick off the filter fetch independently — doesn't block doctor loading.
+    unawaited(_fetchDistinctFilters(gove));
+
+    // 1. Cache-first: Hive, then legacy SharedPreferences (migrate to Hive).
+    List<Map<String, dynamic>>? cached =
+        await HiveCacheService.getCachedDoctors(gove);
+
+    if (cached == null || cached.isEmpty) {
+      final List<Map<String, dynamic>>? spCached = await SpDoctorsCache.load(gove);
+      if (spCached != null && spCached.isNotEmpty) {
+        cached = spCached;
+        unawaited(HiveCacheService.cacheDoctors(spCached, gove));
+        unawaited(SpDoctorsCache.clear(gove));
+      }
+    }
+
+    final bool cacheHit = cached != null && cached.isNotEmpty;
+    final int cachedCount = cached?.length ?? 0;
+    final String goveKey = gove.replaceAll(' ', '_');
+    CrashlyticsService.instance.setCustomKey(
+      'cache_hit_$goveKey',
+      cacheHit ? 'hit' : 'miss',
+    );
+    CrashlyticsService.instance.setCustomKey(
+      'cached_count_$goveKey',
+      cachedCount,
+    );
+
     if (cached != null && cached.isNotEmpty) {
+      _loadUsedCacheHit = true;
       if (!mounted) return;
       _allDoctors = cached
           .map((Map<String, dynamic> json) => Doctor.fromJson(json))
@@ -466,7 +533,18 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     bool forceRefresh = false,
   }) async {
     if (_isRefreshing && !forceRefresh) return;
-    if (mounted) setState(() => _isRefreshing = true);
+    if (mounted) {
+      setState(() {
+        _isRefreshing = true;
+        _isLoadingMore = false;
+      });
+    }
+
+    // Reset pagination state for this governorate session.
+    _lastFetchedId = 0;
+    _lastFetchedOffset = 0;
+    _hasMore = true;
+    _useKeysetPagination = true;
 
     try {
       final bool online = await ConnectivityService.isOnline();
@@ -484,76 +562,324 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
         return;
       }
 
-      // Online: prefer keyset RPC, fall back to range pagination.
-      List<dynamic> allData = <dynamic>[];
+      List<dynamic> firstPage;
       try {
-        allData = await _fetchDoctorsViaKeysetRpc(gove);
-      } catch (keysetErr, keysetSt) {
-        debugPrint(
-          'Keyset RPC unavailable (${AppEndpoints.getDoctorsPageKeyset}), '
-          'using range fallback: $keysetErr',
+        final dynamic raw = await PerformanceService.instance.trace(
+          'fetch_doctors_${gove.replaceAll(' ', '_')}',
+          () => _supabase.rpc(
+            AppEndpoints.getDoctorsPageKeyset,
+            params: <String, dynamic>{
+              'p_gove': gove,
+              'p_limit': _firstPageSize,
+              'p_last_id': 0,
+            },
+          ),
         );
-        debugPrint('$keysetSt');
-        allData = await _fetchDoctorsViaRange(gove);
+        firstPage = raw is List ? raw : <dynamic>[];
+      } catch (keysetErr, keysetSt) {
+        debugPrint('Keyset RPC unavailable, using range fallback: $keysetErr\n$keysetSt');
+        _useKeysetPagination = false;
+        firstPage = await _supabase
+            .from(kSupabaseDoctorsTable)
+            .select(_kDoctorListSelectMinimal)
+            .eq('gove', gove)
+            .order('id', ascending: true)
+            .range(0, _firstPageSize - 1);
       }
-
-      final List<Doctor> doctors = allData
-          .map((dynamic json) => Doctor.fromJson(json as Map<String, dynamic>))
-          .toList();
 
       if (!mounted) return;
 
-      if (doctors.isNotEmpty) {
-        unawaited(
-          SpDoctorsCache.save(gove, allData.cast<Map<String, dynamic>>()),
-        );
+      if (firstPage.isEmpty) {
+        setState(() {
+          _isLoading = false;
+          _isLoadingMore = false;
+          _hasMore = false;
+          _errorMessage = null;
+          _showOfflineBanner = false;
+          _showRetryButton = false;
+        });
+        _rebuildFiltersFromAllDoctors(gove);
+        _applyFilters();
+        return;
       }
+
+      // Update cursor after first page.
+      if (_useKeysetPagination) {
+        final dynamic lastRaw = (firstPage.last as Map<String, dynamic>)['id'];
+        _lastFetchedId = lastRaw is int
+            ? lastRaw
+            : int.tryParse(lastRaw?.toString() ?? '') ?? 0;
+      } else {
+        _lastFetchedOffset = firstPage.length;
+      }
+
+      final List<Doctor> doctors = firstPage
+          .map((dynamic j) => Doctor.fromJson(j as Map<String, dynamic>))
+          .toList();
 
       setState(() {
         _allDoctors = doctors;
-        _lastSyncTime = DateTime.now();
+        _isLoading = false;
+        _isLoadingMore = false;
+        _hasMore = firstPage.length >= _firstPageSize;
         _showOfflineBanner = false;
         _showRetryButton = false;
-        _isLoading = false;
         _errorMessage = null;
+        _lastSyncTime = DateTime.now();
       });
-      _rebuildFiltersFromAllDoctors(gove);
-      _applyFilters();
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('آخر تحديث: الآن'),
-            duration: Duration(seconds: 2),
+      final DateTime? start = _doctorLoadStartedAt;
+      if (start != null) {
+        final int ms = DateTime.now().difference(start).inMilliseconds;
+        unawaited(
+          AnalyticsService.instance.logLoadTime(
+            gove,
+            ms,
+            cacheHit: _loadUsedCacheHit,
           ),
         );
       }
+
+      _rebuildFiltersFromAllDoctors(gove);
+      _applyFilters();
+
+      final List<Map<String, dynamic>> rawMaps =
+          firstPage.cast<Map<String, dynamic>>();
+      unawaited(HiveCacheService.cacheDoctors(rawMaps, gove));
+      unawaited(SpDoctorsCache.clear(gove));
+      unawaited(
+        PerformanceService.instance.markStartupComplete(
+          doctorCount: doctors.length,
+        ),
+      );
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('آخر تحديث: الآن'),
+          duration: Duration(seconds: 2),
+        ),
+      );
     } catch (error, stackTrace) {
       debugPrint('_backgroundRefresh error: $error');
-      debugPrint('$stackTrace');
       CrashlyticsService.instance.logApiFailure(
         AppEndpoints.getDoctorsPageKeyset,
         error,
         stackTrace,
       );
       if (!mounted) return;
-      // Only surface errors when there's nothing cached to show.
-      if (_allDoctors.isEmpty) {
-        setState(() {
+      setState(() {
+        _isLoadingMore = false;
+        if (_allDoctors.isEmpty) {
           _errorMessage = _humanReadableLoadError(error);
           _isLoading = false;
-        });
-      }
+        }
+      });
     } finally {
       if (mounted) setState(() => _isRefreshing = false);
+    }
+  }
+
+  void _onScroll() {
+    if (!_hasMore || _isFetchingPage || _isLoadingMore) return;
+    final double maxScroll = _listScrollController.position.maxScrollExtent;
+    final double currentScroll = _listScrollController.position.pixels;
+    if (currentScroll >= maxScroll - 300) {
+      _fetchNextPage();
+    }
+  }
+
+  Future<void> _fetchNextPage() async {
+    if (_isFetchingPage || !_hasMore) return;
+    final String? gove = _selectedGovernorate;
+    if (gove == null) return;
+
+    if (mounted) setState(() { _isFetchingPage = true; _isLoadingMore = true; });
+
+    try {
+      List<dynamic> response;
+
+      if (_useKeysetPagination) {
+        try {
+          final dynamic raw = await _supabase.rpc(
+            AppEndpoints.getDoctorsPageKeyset,
+            params: <String, dynamic>{
+              'p_gove': gove,
+              'p_limit': _batchSize,
+              'p_last_id': _lastFetchedId,
+            },
+          );
+          response = raw is List ? raw : <dynamic>[];
+        } catch (_) {
+          _useKeysetPagination = false;
+          response = await _supabase
+              .from(kSupabaseDoctorsTable)
+              .select(_kDoctorListSelectMinimal)
+              .eq('gove', gove)
+              .order('id', ascending: true)
+              .range(_lastFetchedOffset, _lastFetchedOffset + _batchSize - 1);
+        }
+      } else {
+        response = await _supabase
+            .from(kSupabaseDoctorsTable)
+            .select(_kDoctorListSelectMinimal)
+            .eq('gove', gove)
+            .order('id', ascending: true)
+            .range(_lastFetchedOffset, _lastFetchedOffset + _batchSize - 1);
+      }
+
+      if (!mounted) return;
+
+      if (response.isEmpty) {
+        setState(() { _hasMore = false; });
+        return;
+      }
+
+      if (_useKeysetPagination) {
+        final dynamic lastRaw =
+            (response.last as Map<String, dynamic>)['id'];
+        _lastFetchedId = lastRaw is int
+            ? lastRaw
+            : int.tryParse(lastRaw?.toString() ?? '') ?? _lastFetchedId;
+      } else {
+        _lastFetchedOffset += response.length;
+      }
+
+      final List<Doctor> newDoctors = response
+          .map((dynamic j) => Doctor.fromJson(j as Map<String, dynamic>))
+          .toList();
+
+      setState(() {
+        _allDoctors = List<Doctor>.from(_allDoctors)..addAll(newDoctors);
+        if (response.length < _batchSize) _hasMore = false;
+      });
+
+      _rebuildFiltersFromAllDoctors(gove);
+      _applyFilters();
+    } catch (e, st) {
+      debugPrint('_fetchNextPage error: $e');
+      CrashlyticsService.instance.logApiFailure(
+        AppEndpoints.getDoctorsPageKeyset,
+        e,
+        st,
+      );
+    } finally {
+      if (mounted) setState(() { _isFetchingPage = false; _isLoadingMore = false; });
+    }
+  }
+
+  /// Fetches results for the active spec/area filter directly from Supabase
+  /// so all matching doctors are shown regardless of lazy-load progress.
+  /// Merges fetched doctors into [_allDoctors] and re-applies local filters.
+  Future<void> _fetchWithFilter() async {
+    final String gove = _selectedGovernorate ?? 'البصرة';
+
+    if (_selectedSpecialization == null && _selectedArea == null) {
+      _activeFilterKey = null;
+      _applyFilters();
+      return;
+    }
+
+    final String filterKey =
+        'spec:${_selectedSpecialization ?? ''}_area:${_selectedArea ?? ''}';
+    _activeFilterKey = filterKey;
+    if (mounted) setState(() => _isFilterFetching = true);
+
+    try {
+      var query = _supabase
+          .from(kSupabaseDoctorsTable)
+          .select(_kDoctorListSelectMinimal)
+          .eq('gove', gove);
+
+      if (_selectedSpecialization != null) {
+        query = query.eq('spec', _selectedSpecialization!);
+      }
+      if (_selectedArea != null) {
+        query = query.eq('area', _selectedArea!);
+      }
+
+      final List<dynamic> rows =
+          await query.order('id', ascending: true).limit(500);
+
+      if (_activeFilterKey != filterKey || !mounted) return;
+
+      final List<Doctor> fetched = rows
+          .map((dynamic j) => Doctor.fromJson(j as Map<String, dynamic>))
+          .toList();
+
+      final Set<int> existingIds = _allDoctors.map((Doctor d) => d.id).toSet();
+      final List<Doctor> newDocs =
+          fetched.where((Doctor d) => !existingIds.contains(d.id)).toList();
+      if (newDocs.isNotEmpty) {
+        _allDoctors = List<Doctor>.from(_allDoctors)..addAll(newDocs);
+      }
+
+      _applyFilters();
+    } catch (e) {
+      debugPrint('_fetchWithFilter error: $e');
+      _applyFilters();
+    } finally {
+      if (mounted && _activeFilterKey == filterKey) {
+        setState(() => _isFilterFetching = false);
+      }
+    }
+  }
+
+  /// Fetches all distinct [spec] and [area] values for [gove] in one query.
+  /// Called immediately when a governorate is selected — does NOT wait for
+  /// the paginated doctor list. Tries the [AppEndpoints.getDoctorsFilters]
+  /// RPC first; falls back to a direct two-column select if unavailable.
+  Future<void> _fetchDistinctFilters(String gove) async {
+    try {
+      List<dynamic> rows;
+      try {
+        final dynamic raw = await _supabase.rpc(
+          AppEndpoints.getDoctorsFilters,
+          params: <String, dynamic>{'p_gove': gove},
+        );
+        rows = raw is List ? raw : <dynamic>[];
+      } catch (_) {
+        rows = await _supabase
+            .from(kSupabaseDoctorsTable)
+            .select('spec, area')
+            .eq('gove', gove);
+      }
+
+      final Set<String> specs = <String>{};
+      final Set<String> areas = <String>{};
+      for (final dynamic row in rows) {
+        final Map<String, dynamic> r = row as Map<String, dynamic>;
+        final String spec = (r['spec'] as String? ?? '').trim();
+        final String area = (r['area'] as String? ?? '').trim();
+        if (spec.isNotEmpty) specs.add(spec);
+        if (area.isNotEmpty) areas.add(area);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _allKnownSpecs = specs;
+        _allKnownAreas = areas;
+      });
+      _rebuildFiltersFromAllDoctors(gove);
+    } catch (e) {
+      debugPrint('_fetchDistinctFilters error: $e');
     }
   }
 
   /// Builds [_areas] and [_specializations] from the current [_allDoctors] list.
   /// Called from both the online fetch path and the offline cache path.
   void _rebuildFiltersFromAllDoctors(String gove) {
-    final Map<String, int> areaCounts = <String, int>{};
-    final Map<String, int> specCounts = <String, int>{};
+    // Seed with every known value at count 0 so all chips appear immediately
+    // even before the full paginated list is loaded.
+    final Map<String, int> areaCounts = <String, int>{
+      for (final String a in _allKnownAreas) a: 0,
+    };
+    final Map<String, int> specCounts = <String, int>{
+      for (final String s in _allKnownSpecs) s: 0,
+    };
+
+    // Count frequencies from the currently-loaded page of doctors.
     for (final Doctor d in _allDoctors) {
       final String area = d.area.trim();
       if (area.isNotEmpty) {
@@ -590,61 +916,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   static const String _kDoctorListSelectMinimal =
       'id, spec, name, addr, area, ph, ph2, notes, gove, latitude, longitude';
-
-  /// Keyset pages via Supabase RPC (requires migration `get_doctors_page_keyset`).
-  Future<List<dynamic>> _fetchDoctorsViaKeysetRpc(String gove) async {
-    final List<dynamic> allData = <dynamic>[];
-    int lastId = 0;
-    while (true) {
-      final dynamic raw = await _supabase.rpc(
-        AppEndpoints.getDoctorsPageKeyset,
-        params: <String, dynamic>{
-          'p_gove': gove,
-          'p_limit': _batchSize,
-          'p_last_id': lastId,
-        },
-      );
-      final List<dynamic> response = raw is List ? raw : <dynamic>[];
-
-      if (response.isEmpty) {
-        break;
-      }
-      allData.addAll(response);
-      if (response.length < _batchSize) {
-        break;
-      }
-      final dynamic lastRaw =
-          (response.last as Map<String, dynamic>)['id'];
-      final int? nextId = lastRaw is int
-          ? lastRaw
-          : int.tryParse(lastRaw?.toString() ?? '');
-      if (nextId == null || nextId <= lastId) {
-        break;
-      }
-      lastId = nextId;
-    }
-    return allData;
-  }
-
-  /// Legacy offset/range pagination — works without the keyset RPC.
-  Future<List<dynamic>> _fetchDoctorsViaRange(String gove) async {
-    final List<dynamic> allData = <dynamic>[];
-    int from = 0;
-    while (true) {
-      final List<dynamic> response = await _supabase
-          .from(kSupabaseDoctorsTable)
-          .select(_kDoctorListSelectMinimal)
-          .eq('gove', gove)
-          .order('id', ascending: true)
-          .range(from, from + _batchSize - 1);
-      allData.addAll(response);
-      if (response.length < _batchSize) {
-        break;
-      }
-      from += _batchSize;
-    }
-    return allData;
-  }
 
   /// رسالة "قريباً" للمحافظات التي لا تحتوي على أطباء بعد.
   Widget _buildGovernorateComingSoon() {
@@ -720,14 +991,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     return 'تعذر تحميل بيانات الأطباء حالياً. حاول مرة أخرى.';
   }
 
-  String _formatSyncAge(DateTime t) {
-    final int minutes = DateTime.now().difference(t).inMinutes;
-    if (minutes < 1) return 'الآن';
-    if (minutes < 60) return '$minutes دقيقة';
-    final int hours = DateTime.now().difference(t).inHours;
-    return '$hours ساعة';
-  }
-
   Widget _buildOfflineRetryView() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
@@ -789,44 +1052,17 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     _searchAnalyticsDebounceTimer?.cancel();
     _searchAnalyticsDebounceTimer =
         Timer(const Duration(milliseconds: 1500), () {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       final String q = _searchController.text.trim();
       if (q.length >= 2) {
         unawaited(AnalyticsService.instance.logSearchUsed(q));
       }
     });
-    _suggestionDebounceTimer?.cancel();
-    _suggestionDebounceTimer = Timer(const Duration(milliseconds: 320), () {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _searchSuggestions = computeLocalSearchSuggestions(
-          query: _searchController.text,
-          doctorNames: _allDoctors.map((Doctor d) => d.name).toList(),
-          areas: _areas,
-          specializations: _specializations,
-        );
-      });
-    });
   }
 
   void _onSearchFocusChanged() {
-    if (!_searchFocusNode.hasFocus) {
-      setState(() => _searchSuggestions = <SearchSuggestionRow>[]);
-    }
-  }
-
-  void _applySuggestionRow(SearchSuggestionRow row) {
-    _searchAnalyticsDebounceTimer?.cancel();
-    unawaited(AnalyticsService.instance.logSearchUsed(row.label));
-    _searchController.text = row.label;
-    _searchController.selection =
-        TextSelection.collapsed(offset: row.label.length);
-    setState(() => _searchSuggestions = <SearchSuggestionRow>[]);
-    _applyFilters();
+    // Rebuild when focus changes to update search bar visual state.
+    if (mounted) setState(() {});
   }
 
   void _resetSearchAndFilters() {
@@ -835,7 +1071,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       _searchController.clear();
       _selectedArea = null;
       _selectedSpecialization = null;
-      _searchSuggestions = <SearchSuggestionRow>[];
     });
     _applyFilters();
   }
@@ -848,7 +1083,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     setState(() {
       _selectedSpecialization = specLabel;
       _searchController.clear();
-      _searchSuggestions = <SearchSuggestionRow>[];
     });
     _applyFilters();
   }
@@ -1450,15 +1684,247 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     }
   }
 
+  String _formatSyncAge(DateTime syncTime) {
+    final Duration age = DateTime.now().difference(syncTime);
+    if (age.inMinutes < 1) return 'الآن';
+    if (age.inMinutes < 60) return 'منذ ${age.inMinutes} د';
+    if (age.inHours < 24) return 'منذ ${age.inHours} س';
+    return 'منذ ${age.inDays} يوم';
+  }
+
+  void _showAppDrawer(BuildContext context) {
+    final bool isLoggedIn =
+        Supabase.instance.client.auth.currentSession != null;
+    final bool isAdmin =
+        sessionUserIsAdmin(Supabase.instance.client.auth.currentUser);
+
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'إغلاق القائمة',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 250),
+      pageBuilder: (_, _, _) => const SizedBox.shrink(),
+      transitionBuilder: (
+        BuildContext ctx,
+        Animation<double> anim,
+        Animation<double> _,
+        Widget _,
+      ) {
+        final Animation<Offset> slide = Tween<Offset>(
+          begin: const Offset(-1.0, 0.0),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(
+          parent: anim,
+          curve: Curves.easeOutCubic,
+        ));
+
+        return SlideTransition(
+          position: slide,
+          child: Directionality(
+            textDirection: TextDirection.rtl,
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: Material(
+                elevation: 16,
+                color: Colors.transparent,
+                child: Container(
+                  width: MediaQuery.of(ctx).size.width * 0.72,
+                  height: double.infinity,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF0F172A),
+                    borderRadius: BorderRadiusDirectional.only(
+                      topEnd: Radius.circular(20),
+                      bottomEnd: Radius.circular(20),
+                    ),
+                  ),
+                  child: SafeArea(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        // ── Header ────────────────────────────
+                        Padding(
+                          padding:
+                              const EdgeInsets.fromLTRB(20, 24, 20, 16),
+                          child: Row(
+                            children: <Widget>[
+                              Container(
+                                width: 42,
+                                height: 42,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFC8A96B),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Icon(
+                                  Icons.local_hospital_rounded,
+                                  color: Color(0xFF0F172A),
+                                  size: 22,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              const Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: <Widget>[
+                                  Text(
+                                    'المدار الطبي',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  Text(
+                                    'دليل الأطباء في العراق',
+                                    style: TextStyle(
+                                      color: Colors.white38,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        Divider(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          height: 1,
+                        ),
+                        const SizedBox(height: 8),
+
+                        // ── Menu Items ────────────────────────
+                        _DrawerItem(
+                          icon: Icons.refresh_rounded,
+                          label: 'تحديث البيانات',
+                          subtitle: _lastSyncTime != null
+                              ? 'آخر تحديث: ${_formatSyncAge(_lastSyncTime!)}'
+                              : null,
+                          trailing: _isRefreshing
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Color(0xFFC8A96B),
+                                  ),
+                                )
+                              : null,
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _backgroundRefresh(
+                              _selectedGovernorate ?? 'البصرة',
+                              forceRefresh: true,
+                            );
+                          },
+                        ),
+
+                        _DrawerItem(
+                          icon: Icons.headset_mic_rounded,
+                          label: 'الدعم والتواصل',
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _showSupportSheet(context);
+                          },
+                        ),
+
+                        if (kIsWeb)
+                          _DrawerItem(
+                            icon: Icons.install_mobile_outlined,
+                            label: 'تنزيل التطبيق',
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _onInstallTap(context);
+                            },
+                          ),
+
+                        if (isAdmin) ...<Widget>[
+                          Divider(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            height: 16,
+                            indent: 20,
+                            endIndent: 20,
+                          ),
+                          _DrawerItem(
+                            icon: Icons.admin_panel_settings_outlined,
+                            label: 'لوحة الإدارة',
+                            iconColor: const Color(0xFFC8A96B),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              Navigator.pushNamed(context, '/admin');
+                            },
+                          ),
+                        ],
+
+                        if (kDebugMode && !kIsWeb) ...<Widget>[
+                          Divider(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            height: 16,
+                            indent: 20,
+                            endIndent: 20,
+                          ),
+                          _DrawerItem(
+                            icon: Icons.bug_report_outlined,
+                            label: 'اختبار Crashlytics',
+                            iconColor: Colors.redAccent,
+                            labelColor: Colors.redAccent,
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              FirebaseCrashlytics.instance.crash();
+                            },
+                          ),
+                        ],
+
+                        const Spacer(),
+
+                        // ── Footer: logout or login ────────────
+                        Divider(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          height: 1,
+                        ),
+                        if (isLoggedIn)
+                          _DrawerItem(
+                            icon: Icons.logout_rounded,
+                            label: 'تسجيل الخروج',
+                            iconColor: Colors.redAccent.shade100,
+                            labelColor: Colors.redAccent.shade100,
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _signOutFromHome();
+                            },
+                          )
+                        else
+                          _DrawerItem(
+                            icon: Icons.login_rounded,
+                            label: 'تسجيل الدخول',
+                            iconColor: const Color(0xFFC8A96B),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              Navigator.pushNamed(context, '/auth');
+                            },
+                          ),
+                        const SizedBox(height: 12),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
     _adminTapResetTimer?.cancel();
-    _suggestionDebounceTimer?.cancel();
     _searchAnalyticsDebounceTimer?.cancel();
     _authStateSub?.cancel();
     _authStateSub = null;
     _connectivitySub?.cancel();
     _connectivitySub = null;
+    _listScrollController.removeListener(_onScroll);
+    _listScrollController.dispose();
     _searchController.removeListener(_onSearchTextChanged);
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
@@ -1479,10 +1945,22 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    const Color primaryMedicalBlue = Color(0xFF42A5F5);
-    const Color sectionShadow = Color(0x1A000000);
-    final double listBottomInset =
-        MediaQuery.paddingOf(context).bottom + 88 + 56;
+    if (!_governoratePickerDone) {
+      return Directionality(
+        textDirection: TextDirection.rtl,
+        child: GovernoratePickerScreen(
+          onPicked: (String gove) {
+            setState(() {
+              _selectedGovernorate = gove;
+              _governoratePickerDone = true;
+            });
+            _loadDoctors();
+          },
+        ),
+      );
+    }
+
+    const Color primaryMedicalBlue = Color(0xFF0A2540);
     final bool isAdmin =
         sessionUserIsAdmin(Supabase.instance.client.auth.currentUser);
     // Clamp index when the "عيادتي" tab is hidden to avoid showing an empty stack.
@@ -1502,14 +1980,8 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
       // في RTL تكون "البداية" يمين الشاشة — موضع مريح للإبهام.
       floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
       bottomNavigationBar: NavigationBar(
-        height: 64,
         selectedIndex: safeNavIndex,
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.transparent,
-        indicatorColor: primaryMedicalBlue.withValues(alpha: 0.2),
-        onDestinationSelected: (int index) {
-          setState(() => _homeNavIndex = index);
-        },
+        onDestinationSelected: (int i) => setState(() => _homeNavIndex = i),
         destinations: <NavigationDestination>[
           const NavigationDestination(
             icon: Icon(Icons.home_outlined),
@@ -1529,281 +2001,152 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             ),
         ],
       ),
-      body: IndexedStack(
-        index: safeNavIndex,
-        children: <Widget>[
-          RefreshIndicator(
-            onRefresh: () => _backgroundRefresh(
-              _selectedGovernorate ?? 'البصرة',
-              forceRefresh: true,
-            ),
-          child: CustomScrollView(
+      body: safeNavIndex == 0
+          ? RefreshIndicator(
+              onRefresh: () => _backgroundRefresh(
+                _selectedGovernorate ?? 'البصرة',
+                forceRefresh: true,
+              ),
+              child: CustomScrollView(
+        controller: _listScrollController,
         slivers: <Widget>[
           SliverAppBar(
             pinned: true,
             floating: false,
-            backgroundColor: primaryMedicalBlue,
+            forceElevated: false,
+            backgroundColor: AppColors.primary,
             foregroundColor: Colors.white,
             surfaceTintColor: Colors.transparent,
-            elevation: 1,
-            centerTitle: true,
+            elevation: 0,
+            centerTitle: false,
             automaticallyImplyLeading: false,
-            leading: kIsWeb
-                ? IconButton(
-                    tooltip: 'تنزيل التطبيق',
-                    onPressed: () => _onInstallTap(context),
-                    icon: const Icon(Icons.install_mobile_outlined),
-                  )
-                : null,
+            systemOverlayStyle: const SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: Brightness.light,
+              statusBarBrightness: Brightness.dark,
+            ),
+            expandedHeight:
+                MediaQuery.of(context).size.width < 360 ? 148.0 : 160.0,
+            leading: Builder(
+              builder: (BuildContext ctx) => IconButton(
+                tooltip: 'القائمة',
+                icon: const Icon(Icons.menu_rounded, size: 24),
+                onPressed: () => _showAppDrawer(ctx),
+              ),
+            ),
             title: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _handleAdminTitleTap,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                child: Text(
-                  'المدار الطبي',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 17,
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Icon(Icons.local_hospital_rounded,
+                      color: AppColors.accent, size: 20),
+                  SizedBox(width: 6),
+                  Text(
+                    'المدار الطبي',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 17,
+                      color: Colors.white,
+                    ),
                   ),
-                ),
+                ],
               ),
             ),
             actions: <Widget>[
-              // Last sync timestamp
-              if (_lastSyncTime != null)
-                Padding(
-                  padding: const EdgeInsetsDirectional.only(start: 4),
-                  child: Center(
-                    child: Text(
-                      'محدّث قبل ${_formatSyncAge(_lastSyncTime!)}',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ),
-                ),
-              // Offline indicator
+              // Offline indicator — zero width when online
               StreamBuilder<bool>(
                 stream: ConnectivityService.onlineStream(),
-                builder:
-                    (BuildContext context, AsyncSnapshot<bool> snap) {
-                  final bool online = snap.data ?? true;
-                  if (online) return const SizedBox.shrink();
+                builder: (BuildContext context, AsyncSnapshot<bool> snap) {
+                  if (snap.data ?? true) return const SizedBox.shrink();
                   return const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 4),
-                    child: Icon(
-                      Icons.wifi_off_rounded,
-                      color: Colors.orange,
-                      size: 20,
-                    ),
+                    child: Icon(Icons.wifi_off_rounded,
+                        color: Colors.orange, size: 18),
                   );
                 },
               ),
-              // Manual refresh / spinner
-              if (_isRefreshing)
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 12),
-                  child: Center(
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                )
-              else
-                IconButton(
-                  tooltip: 'تحديث',
-                  onPressed: () => _backgroundRefresh(
-                    _selectedGovernorate ?? 'البصرة',
-                    forceRefresh: true,
-                  ),
-                  icon: const Icon(Icons.refresh),
-                ),
+              // Search icon — always visible
               IconButton(
-                tooltip:
-                    _searchFieldVisible ? 'إغلاق البحث' : 'بحث',
+                tooltip: _searchFieldVisible ? 'إغلاق البحث' : 'بحث',
                 onPressed: _toggleSearchField,
                 icon: Icon(
-                  _searchFieldVisible ? Icons.close : Icons.search,
+                  _searchFieldVisible
+                      ? Icons.close_rounded
+                      : Icons.search_rounded,
+                  size: 23,
                 ),
               ),
-              if (Supabase.instance.client.auth.currentSession != null)
-                IconButton(
-                  tooltip: 'تسجيل الخروج',
-                  onPressed: _signOutFromHome,
-                  icon: const Icon(Icons.logout_outlined),
-                ),
-              if (sessionUserIsAdmin(
-                  Supabase.instance.client.auth.currentUser))
-                IconButton(
-                  tooltip: 'لوحة الإدارة',
-                  onPressed: () =>
-                      Navigator.pushNamed(context, '/admin'),
-                  icon: const Icon(Icons.admin_panel_settings_outlined),
-                ),
-              if (kDebugMode && !kIsWeb)
-                PopupMenuButton<String>(
-                  tooltip: 'أدوات التطوير',
-                  icon: const Icon(Icons.bug_report_outlined),
-                  onSelected: (String value) {
-                    if (value == 'crash') {
-                      FirebaseCrashlytics.instance.crash();
-                    }
-                  },
-                  itemBuilder: (BuildContext context) {
-                    return <PopupMenuEntry<String>>[
-                      const PopupMenuItem<String>(
-                        value: 'crash',
-                        child: Text('تعطّل التطبيق — اختبار Crashlytics'),
-                      ),
-                    ];
-                  },
-                ),
+              const SizedBox(width: 4),
             ],
-            expandedHeight: 202,
             flexibleSpace: FlexibleSpaceBar(
               titlePadding: EdgeInsets.zero,
-              centerTitle: true,
               background: ColoredBox(
-                color: primaryMedicalBlue,
+                color: AppColors.primary,
                 child: SafeArea(
                   bottom: false,
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: SingleChildScrollView(
-                      child: Padding(
-                        padding: const EdgeInsetsDirectional.fromSTEB(
-                          8,
-                          kToolbarHeight + 2,
-                          8,
-                          6,
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: <Widget>[
-                            _buildLocationFiltersCard(sectionShadow),
-                            const SizedBox(height: 6),
-                            _buildSpecializationFilterRow(
-                              primaryMedicalBlue,
-                              sectionShadow,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+                  top: true,
+                  child: Padding(
+                    padding: const EdgeInsetsDirectional.fromSTEB(
+                        12, kToolbarHeight + 6, 12, 8),
+                    child: _buildSearchBar(),
                   ),
                 ),
               ),
             ),
           ),
+          if (_isFilterFetching)
+            const SliverToBoxAdapter(
+              child: LinearProgressIndicator(
+                minHeight: 2,
+                backgroundColor: Colors.transparent,
+                valueColor:
+                    AlwaysStoppedAnimation<Color>(AppColors.accent),
+              ),
+            ),
+          // Specialization chip row
           SliverToBoxAdapter(
-            child: AnimatedSize(
-              duration: const Duration(milliseconds: 320),
-              curve: Curves.easeInOut,
-              alignment: AlignmentDirectional.topCenter,
-              child: _searchFieldVisible
-                  ? Padding(
-                      padding: const EdgeInsetsDirectional.fromSTEB(
-                        12,
-                        4,
-                        12,
-                        8,
-                      ),
-                      child: Material(
-                        elevation: 2,
-                        shadowColor: const Color(0x33000000),
-                        borderRadius: BorderRadius.circular(12),
-                        color: Colors.white,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: <Widget>[
-                            TextField(
-                              controller: _searchController,
-                              focusNode: _searchFocusNode,
-                              decoration: InputDecoration(
-                                hintText: 'ابحث عن طبيب أو تخصص أو منطقة',
-                                filled: true,
-                                fillColor: const Color(0xFFEEEEEE),
-                                isDense: true,
-                                prefixIcon:
-                                    const Icon(Icons.search, size: 22),
-                                suffixIcon: IconButton(
-                                  tooltip: 'إغلاق',
-                                  onPressed: () {
-                                    setState(() {
-                                      _searchFieldVisible = false;
-                                      _searchSuggestions =
-                                          <SearchSuggestionRow>[];
-                                    });
-                                    _searchFocusNode.unfocus();
-                                  },
-                                  icon: const Icon(Icons.close),
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide.none,
-                                ),
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 12,
-                                ),
-                              ),
-                            ),
-                            if (_searchFocusNode.hasFocus &&
-                                _searchSuggestions.isNotEmpty)
-                              ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxHeight: 220,
-                                ),
-                                child: ListView.separated(
-                                  shrinkWrap: true,
-                                  padding: EdgeInsets.zero,
-                                  itemCount: _searchSuggestions.length,
-                                  separatorBuilder:
-                                      (BuildContext context, int index) =>
-                                          const Divider(height: 1),
-                                  itemBuilder:
-                                      (BuildContext ctx, int index) {
-                                    final SearchSuggestionRow row =
-                                        _searchSuggestions[index];
-                                    final IconData icon = switch (row.kind) {
-                                      SearchSuggestionKind.doctorName =>
-                                        Icons.person_outline_rounded,
-                                      SearchSuggestionKind.specialization =>
-                                        Icons.medical_services_outlined,
-                                      SearchSuggestionKind.area =>
-                                        Icons.place_outlined,
-                                    };
-                                    return ListTile(
-                                      dense: true,
-                                      leading: Icon(
-                                        icon,
-                                        size: 22,
-                                        color: primaryMedicalBlue,
-                                      ),
-                                      title: Text(
-                                        row.label,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      onTap: () => _applySuggestionRow(row),
-                                    );
-                                  },
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    )
-                  : const SizedBox.shrink(),
+            child: _buildHorizontalChips(
+              label: 'التخصص',
+              items: _specializations,
+              selected: _selectedSpecialization,
+              onSelected: (String? v) {
+                unawaited(AnalyticsService.instance.logFilterUsed(
+                    'specialization', value: v ?? 'all'));
+                if (v == null && _selectedArea == null) {
+                  setState(() {
+                    _selectedSpecialization = null;
+                    _activeFilterKey = null;
+                  });
+                  _applyFilters();
+                } else {
+                  setState(() => _selectedSpecialization = v);
+                  unawaited(_fetchWithFilter());
+                }
+              },
+            ),
+          ),
+          // Area chip row
+          SliverToBoxAdapter(
+            child: _buildHorizontalChips(
+              label: 'المنطقة',
+              items: _areas,
+              selected: _selectedArea,
+              onSelected: (String? v) {
+                unawaited(AnalyticsService.instance.logFilterUsed(
+                    'area', value: v ?? 'all'));
+                if (v == null && _selectedSpecialization == null) {
+                  setState(() {
+                    _selectedArea = null;
+                    _activeFilterKey = null;
+                  });
+                  _applyFilters();
+                } else {
+                  setState(() => _selectedArea = v);
+                  unawaited(_fetchWithFilter());
+                }
+              },
             ),
           ),
           SliverToBoxAdapter(
@@ -1913,14 +2256,9 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
               hasScrollBody: false,
               child: _buildSmartEmptySearchState(),
             )
-          else
+          else ...<Widget>[
             SliverPadding(
-              padding: EdgeInsetsDirectional.fromSTEB(
-                8,
-                0,
-                8,
-                listBottomInset,
-              ),
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 80),
               sliver: SliverList(
                 delegate: SliverChildBuilderDelegate(
                   (BuildContext context, int index) {
@@ -1930,16 +2268,43 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                 ),
               ),
             ),
+            if (_isLoadingMore)
+              const SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Center(
+                    child: SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                ),
+              ),
+            if (!_hasMore && _filteredDoctors.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Center(
+                    child: Text(
+                      'تم تحميل جميع الأطباء (${_filteredDoctors.length})',
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ],
       ),
-          ), // RefreshIndicator
-          _buildFavoritesTabContent(),
-          if (isAdmin)
-            const MyClinicScreen()
-          else
-            const SizedBox.shrink(),
-        ],
-      ),
+            ) // RefreshIndicator
+          : safeNavIndex == 1
+              ? _buildFavoritesTabContent()
+              : isAdmin
+                  ? const MyClinicScreen()
+                  : const SizedBox.shrink(),
     );
   }
 
@@ -2132,214 +2497,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     );
   }
 
-  /// فلاتر المحافظة/المنطقة فقط (البحث النصي من أيقونة المكبّر في [SliverAppBar]).
-  Widget _buildLocationFiltersCard(Color sectionShadow) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: sectionShadow,
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: _buildDropdownField(
-              label: 'المحافظة',
-              value: _selectedGovernorate,
-              items: kGovernorates,
-              onChanged: (String? value) {
-                if (value != null) {
-                  unawaited(
-                    AnalyticsService.instance
-                        .logFilterUsed('governorate', value: value),
-                  );
-                }
-                setState(() {
-                  _selectedGovernorate = value;
-                });
-                CrashlyticsService.instance
-                    .setScreen('home_${_selectedGovernorate ?? 'البصرة'}');
-                _loadDoctors();
-              },
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: _buildAreaDropdownField(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDropdownField({
-    required String label,
-    required String? value,
-    required List<String> items,
-    required ValueChanged<String?> onChanged,
-  }) {
-    return DropdownButtonFormField<String>(
-      initialValue: value,
-      isExpanded: true,
-      decoration: InputDecoration(
-        labelText: label,
-        filled: true,
-        fillColor: const Color(0xFFF2F7FC),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide.none,
-        ),
-      ),
-      hint: Text('اختر $label'),
-      items: items
-          .map(
-            (String item) => DropdownMenuItem<String>(
-              value: item,
-              child: Text(item),
-            ),
-          )
-          .toList(),
-      onChanged: onChanged,
-    );
-  }
-
-  Widget _buildAreaDropdownField() {
-    return DropdownButtonFormField<String?>(
-      initialValue: _selectedArea,
-      isExpanded: true,
-      decoration: InputDecoration(
-        labelText: 'المنطقة',
-        filled: true,
-        fillColor: const Color(0xFFF2F7FC),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide.none,
-        ),
-      ),
-      hint: const Text('اختر المنطقة'),
-      items: <DropdownMenuItem<String?>>[
-        const DropdownMenuItem<String?>(
-          value: null,
-          child: Text('الكل'),
-        ),
-        ..._areas.map(
-          (String area) => DropdownMenuItem<String?>(
-            value: area,
-            child: Text(area),
-          ),
-        ),
-      ],
-      onChanged: (String? value) {
-        unawaited(
-          AnalyticsService.instance.logFilterUsed(
-            'area',
-            value: value ?? 'all',
-          ),
-        );
-        setState(() {
-          _selectedArea = value;
-        });
-        _applyFilters();
-      },
-    );
-  }
-
-  Widget _buildSpecializationFilterRow(
-    Color primaryMedicalBlue,
-    Color sectionShadow,
-  ) {
-    return Container(
-      padding: const EdgeInsetsDirectional.fromSTEB(8, 6, 8, 6),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: sectionShadow,
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          const Text(
-            'فلتر التخصصات',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF1D3557),
-            ),
-          ),
-          const SizedBox(height: 4),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: <Widget>[
-                Padding(
-                  padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 4, 0),
-                  child: ChoiceChip(
-                    label: const Text('الكل', style: TextStyle(fontSize: 12)),
-                    selected: _selectedSpecialization == null,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    onSelected: (_) {
-                      unawaited(
-                        AnalyticsService.instance
-                            .logFilterUsed('specialization', value: 'all'),
-                      );
-                      setState(() {
-                        _selectedSpecialization = null;
-                      });
-                      _applyFilters();
-                    },
-                  ),
-                ),
-                ..._specializations.map((String specialization) {
-                  final bool isSelected =
-                      _selectedSpecialization == specialization;
-                  return Padding(
-                    padding: const EdgeInsetsDirectional.fromSTEB(0, 0, 4, 0),
-                    child: ChoiceChip(
-                      selectedColor: primaryMedicalBlue.withValues(alpha: 0.15),
-                      label: Text(
-                        specialization,
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      selected: isSelected,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      onSelected: (_) {
-                        final String? next =
-                            isSelected ? null : specialization;
-                        unawaited(
-                          AnalyticsService.instance.logFilterUsed(
-                            'specialization',
-                            value: next ?? 'all',
-                          ),
-                        );
-                        setState(() {
-                          _selectedSpecialization = next;
-                        });
-                        _applyFilters();
-                      },
-                    ),
-                  );
-                }),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   /// Trust-layer badge: green pill that surfaces the verification date when known.
   Widget _buildVerifiedBadge(DateTime? verificationDate) {
@@ -2387,256 +2544,806 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   }
 
   Widget _buildClinicCard(Doctor doctor) {
-    const Color chipTeal = Color(0xFF006064);
-    const Color chipBg = Color(0xFFE0F7FA);
-    const Color kCardBlue = Color(0xFF1565C0);
     final String primaryPhone =
         doctor.ph.trim().isNotEmpty ? doctor.ph.trim() : doctor.ph2.trim();
+
     return Container(
-      margin: const EdgeInsets.only(bottom: 6),
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.06),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
+        ],
+        border: Border(
+          right: BorderSide(
+            color: doctor.isVerified
+                ? AppColors.statusOnline
+                : AppColors.border,
+            width: 3.5,
+          ),
+        ),
+      ),
       child: Material(
-        color: Theme.of(context).colorScheme.surface,
-        elevation: 2,
-        shadowColor: const Color(0x22000000),
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(16),
         child: InkWell(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(16),
           onTap: () => _showDoctorDetails(context, doctor),
+          splashColor: AppColors.accent.withValues(alpha: 0.08),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            child: Row(
-              // أولوية الصف: النص (يمين) ثم الأفاتار يسار الشاشة في وضع RTL
-              textDirection: TextDirection.rtl,
+            padding: const EdgeInsetsDirectional.fromSTEB(14, 12, 10, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Row(
+                Row(
+                  textDirection: TextDirection.rtl,
+                  children: <Widget>[
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: <Color>[
+                            AppColors.primary,
+                            Color(0xFF1A3A5C)
+                          ],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Center(
+                        child: Text(
+                          doctor.name.isNotEmpty
+                              ? doctor.name.substring(0, 1)
+                              : '؟',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
-                          Expanded(
-                            child: Wrap(
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              spacing: 6,
-                              runSpacing: 4,
-                              children: <Widget>[
-                                Text(
+                          Row(
+                            children: <Widget>[
+                              Expanded(
+                                child: Text(
                                   doctor.name,
                                   style: const TextStyle(
-                                    fontSize: 16,
+                                    fontSize: 15,
                                     fontWeight: FontWeight.w800,
+                                    color: AppColors.textPrimary,
                                   ),
-                                ),
-                                if (doctor.isVerified)
-                                  _buildVerifiedBadge(doctor.verificationDate),
-                              ],
-                            ),
-                          ),
-                          Consumer<FavoritesProvider>(
-                            builder: (BuildContext context,
-                                FavoritesProvider fav, _) {
-                              final bool saved = fav.isFavorite(doctor.id);
-                              return IconButton(
-                                tooltip: saved
-                                    ? 'إزالة من أطبائي'
-                                    : 'حفظ في أطبائي',
-                                onPressed: () {
-                                  unawaited(fav.toggle(doctor.id));
-                                },
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                constraints: const BoxConstraints(
-                                  minWidth: 36,
-                                  minHeight: 36,
-                                ),
-                                icon: Icon(
-                                  saved
-                                      ? Icons.favorite_rounded
-                                      : Icons.favorite_border_rounded,
-                                  color: saved
-                                      ? const Color(0xFFE53935)
-                                      : const Color(0xFF90A4AE),
-                                  size: 22,
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Align(
-                        alignment: AlignmentDirectional.centerStart,
-                        child: Chip(
-                          materialTapTargetSize:
-                              MaterialTapTargetSize.shrinkWrap,
-                          visualDensity: VisualDensity.compact,
-                          side: const BorderSide(color: Color(0xFF00ACC1)),
-                          backgroundColor: chipBg,
-                          label: Text(
-                            doctor.spec,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w600,
-                              color: chipTeal,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: <Widget>[
-                          Icon(
-                            Icons.place_rounded,
-                            size: 16,
-                            color: Colors.red.shade400,
-                          ),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              doctor.area,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Theme.of(context).colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ),
-                          if (doctor.lastStatusUpdate != null)
-                            Padding(
-                              padding: const EdgeInsetsDirectional.only(start: 6),
-                              child: Text(
-                                _formatLastStatusUpdate(doctor.lastStatusUpdate!),
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: Color(0xFF90A4AE),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Semantics(
-                        label: 'واتساب، الخرائط، الاتصال، اقتراح تعديل',
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          physics: const ClampingScrollPhysics(),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: <Widget>[
-                              IconButton(
-                                onPressed: primaryPhone.isEmpty
-                                    ? null
-                                    : () => _openWhatsApp(
-                                          primaryPhone,
-                                          doctorName: doctor.name.isNotEmpty
-                                              ? doctor.name
-                                              : 'غير معروف',
-                                        ),
-                                icon: const FaIcon(
-                                  FontAwesomeIcons.whatsapp,
-                                  size: 18,
-                                  color: Color(0xFF25D366),
-                                ),
-                                tooltip: 'واتساب',
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                style: IconButton.styleFrom(
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  minimumSize: const Size(36, 36),
-                                  maximumSize: const Size(40, 40),
-                                ),
-                              ),
-                              if (sessionUserIsAdmin(Supabase
-                                      .instance.client.auth.currentUser) &&
-                                  doctor.hasCoordinates)
-                                IconButton(
-                                  onPressed: () {
-                                    unawaited(_openGoogleMapsLatLng(
-                                      doctor.latitude!,
-                                      doctor.longitude!,
-                                      locationDetail: doctor.name,
-                                    ));
-                                  },
-                                  icon: Icon(
-                                    Icons.add_location_alt_rounded,
-                                    size: 20,
-                                    color: Colors.blue.shade700,
-                                  ),
-                                  tooltip: 'الموقع على الخريطة',
-                                  padding: EdgeInsets.zero,
-                                  visualDensity: VisualDensity.compact,
-                                  style: IconButton.styleFrom(
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                    minimumSize: const Size(36, 36),
-                                    maximumSize: const Size(40, 40),
-                                  ),
-                                ),
-                              IconButton(
-                                onPressed: primaryPhone.isEmpty
-                                    ? null
-                                    : () => _openDialer(
-                                          primaryPhone,
-                                          doctorName: doctor.name.isNotEmpty
-                                              ? doctor.name
-                                              : 'غير معروف',
-                                        ),
-                                icon: const Icon(
-                                  Icons.call_outlined,
-                                  size: 20,
-                                ),
-                                tooltip: 'اتصال',
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                style: IconButton.styleFrom(
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  minimumSize: const Size(36, 36),
-                                  maximumSize: const Size(40, 40),
-                                  foregroundColor: kCardBlue,
-                                ),
-                              ),
-                              IconButton(
-                                onPressed: () =>
-                                    _showReportDoctorSheet(doctor),
-                                icon: const Icon(
-                                  Icons.edit_note_outlined,
-                                  size: 20,
-                                ),
-                                tooltip: 'اقتراح تعديل',
-                                padding: EdgeInsets.zero,
-                                visualDensity: VisualDensity.compact,
-                                style: IconButton.styleFrom(
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  minimumSize: const Size(36, 36),
-                                  maximumSize: const Size(40, 40),
-                                  foregroundColor: const Color(0xFF1D3557),
-                                ),
-                              ),
+                              if (doctor.isVerified)
+                                _buildVerifiedBadge(doctor.verificationDate),
                             ],
                           ),
+                          const SizedBox(height: 2),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AppColors.accentLight,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                  color: AppColors.accent, width: 0.6),
+                            ),
+                            child: Text(
+                              doctor.spec,
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.primary,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Consumer<FavoritesProvider>(
+                      builder:
+                          (BuildContext context, FavoritesProvider fav, _) {
+                        final bool saved = fav.isFavorite(doctor.id);
+                        return IconButton(
+                          tooltip: saved
+                              ? 'إزالة من أطبائي'
+                              : 'حفظ في أطبائي',
+                          onPressed: () => unawaited(fav.toggle(doctor.id)),
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints(
+                              minWidth: 36, minHeight: 36),
+                          icon: Icon(
+                            saved
+                                ? Icons.favorite_rounded
+                                : Icons.favorite_border_rounded,
+                            color: saved
+                                ? AppColors.statusClosed
+                                : AppColors.textHint,
+                            size: 20,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  textDirection: TextDirection.rtl,
+                  children: <Widget>[
+                    const Icon(Icons.place_rounded,
+                        size: 14, color: AppColors.accent),
+                    const SizedBox(width: 3),
+                    Expanded(
+                      child: Text(
+                        doctor.area,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          color: AppColors.textSecond,
                         ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (doctor.lastStatusUpdate != null)
+                      Text(
+                        _formatLastStatusUpdate(doctor.lastStatusUpdate!),
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          color: AppColors.textHint,
+                        ),
+                      ),
+                  ],
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Divider(
+                      height: 1,
+                      color: AppColors.border.withValues(alpha: 0.5)),
+                ),
+                Semantics(
+                  label: 'واتساب، الاتصال، اقتراح تعديل',
+                  child: Row(
+                    textDirection: TextDirection.rtl,
+                    children: <Widget>[
+                      _MiniAction(
+                        icon: FontAwesomeIcons.whatsapp,
+                        color: const Color(0xFF25D366),
+                        tooltip: 'واتساب',
+                        isFa: true,
+                        onTap: primaryPhone.isEmpty
+                            ? null
+                            : () => _openWhatsApp(primaryPhone,
+                                doctorName: doctor.name.isNotEmpty
+                                    ? doctor.name
+                                    : 'غير معروف'),
+                      ),
+                      _MiniAction(
+                        icon: Icons.call_rounded,
+                        color: AppColors.primary,
+                        tooltip: 'اتصال',
+                        isFa: false,
+                        onTap: primaryPhone.isEmpty
+                            ? null
+                            : () => _openDialer(primaryPhone,
+                                doctorName: doctor.name.isNotEmpty
+                                    ? doctor.name
+                                    : 'غير معروف'),
+                      ),
+                      if (sessionUserIsAdmin(
+                              Supabase.instance.client.auth.currentUser) &&
+                          doctor.hasCoordinates)
+                        _MiniAction(
+                          icon: Icons.add_location_alt_rounded,
+                          color: const Color(0xFF1976D2),
+                          tooltip: 'الموقع على الخريطة',
+                          isFa: false,
+                          onTap: () => unawaited(_openGoogleMapsLatLng(
+                            doctor.latitude!,
+                            doctor.longitude!,
+                            locationDetail: doctor.name,
+                          )),
+                        ),
+                      _MiniAction(
+                        icon: Icons.edit_note_rounded,
+                        color: AppColors.textSecond,
+                        tooltip: 'اقتراح تعديل',
+                        isFa: false,
+                        onTap: () => _showReportDoctorSheet(doctor),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                CircleAvatar(
-                  radius: 28,
-                  backgroundColor: const Color(0xFFE3F2FD),
-                  child: Icon(
-                    Icons.person,
-                    size: 32,
-                    color: kCardBlue,
-                  ),
-                ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchBar() {
+    return Container(
+      height: 44,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        children: <Widget>[
+          GestureDetector(
+            onTap: _showGovernoratePicker,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: const BoxDecoration(
+                color: Color(0x26C8A96B),
+                borderRadius: BorderRadius.horizontal(
+                    right: Radius.circular(12)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  const Icon(Icons.location_on_rounded,
+                      size: 14, color: AppColors.accent),
+                  const SizedBox(width: 4),
+                  Text(
+                    _selectedGovernorate ?? 'المحافظة',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.accent,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.keyboard_arrow_down_rounded,
+                      size: 14, color: AppColors.accent),
+                ],
+              ),
+            ),
+          ),
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              focusNode: _searchFocusNode,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              decoration: const InputDecoration(
+                hintText: 'ابحث عن طبيب أو تخصص...',
+                hintStyle: TextStyle(color: Colors.white54, fontSize: 13),
+                prefixIcon: Icon(Icons.search_rounded,
+                    color: Colors.white60, size: 18),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding:
+                    EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showGovernoratePicker() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Container(
+          height: MediaQuery.of(ctx).size.height * 0.75,
+          decoration: const BoxDecoration(
+            color: AppColors.background,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            children: <Widget>[
+              const SizedBox(height: 12),
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: AppColors.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'اختر المحافظة',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: GridView.builder(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                  gridDelegate:
+                      const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 3,
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                    childAspectRatio: 1.2,
+                  ),
+                  itemCount: kGovernorates.length,
+                  itemBuilder: (BuildContext ctx2, int i) {
+                    final String gove = kGovernorates[i];
+                    final bool selected = gove == _selectedGovernorate;
+                    return GestureDetector(
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        if (gove == _selectedGovernorate) return;
+                        unawaited(AnalyticsService.instance
+                            .logGovernorateSelected(gove));
+                        setState(() {
+                          _selectedGovernorate = gove;
+                          _allDoctors = <Doctor>[];
+                          _filteredDoctors = <Doctor>[];
+                          _lastFetchedId = 0;
+                          _lastFetchedOffset = 0;
+                          _hasMore = true;
+                          _isFetchingPage = false;
+                          _isLoadingMore = false;
+                          _useKeysetPagination = true;
+                        });
+                        SharedPreferences.getInstance().then(
+                          (SharedPreferences p) => p.setString(
+                              kPrefSelectedGovernorate, gove),
+                        );
+                        if (_listScrollController.hasClients) {
+                          _listScrollController.jumpTo(0);
+                        }
+                        _loadDoctors();
+                      },
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: selected
+                              ? AppColors.primary
+                              : AppColors.surface,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: selected
+                                ? AppColors.accent
+                                : AppColors.border,
+                            width: selected ? 1.5 : 1,
+                          ),
+                        ),
+                        child: Center(
+                          child: Text(
+                            gove,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: selected
+                                  ? Colors.white
+                                  : AppColors.textPrimary,
+                            ),
+                            textAlign: TextAlign.center,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHorizontalChips({
+    required String label,
+    required List<String> items,
+    required String? selected,
+    required void Function(String?) onSelected,
+  }) {
+    if (items.isEmpty) return const SizedBox.shrink();
+    return SizedBox(
+      height: 40,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 12, 4),
+        itemCount: items.length + 1,
+        separatorBuilder: (BuildContext _, int _) => const SizedBox(width: 6),
+        itemBuilder: (BuildContext context, int i) {
+          if (i == 0) {
+            return _LuxChip(
+              label: 'الكل',
+              selected: selected == null,
+              onTap: () => onSelected(null),
+            );
+          }
+          final String item = items[i - 1];
+          return _LuxChip(
+            label: item,
+            selected: selected == item,
+            onTap: () => onSelected(selected == item ? null : item),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showSupportSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: <Widget>[
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: <Color>[
+                          AppColors.primary,
+                          AppColors.accent
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.headset_mic_rounded,
+                        color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        'تواصل مع الدعم',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                      Text(
+                        'نحن هنا للمساعدة',
+                        style: TextStyle(
+                            fontSize: 12, color: AppColors.textSecond),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              _supportTile(
+                icon: FontAwesomeIcons.whatsapp,
+                color: const Color(0xFF25D366),
+                title: 'واتساب / هاتف',
+                subtitle: '+9647770738575',
+                isFa: true,
+                onTap: () async {
+                  final Uri waUri = Uri.parse('https://wa.me/9647770738575');
+                  if (await canLaunchUrl(waUri)) unawaited(launchUrl(waUri));
+                },
+              ),
+              const SizedBox(height: 10),
+              _supportTile(
+                icon: Icons.email_rounded,
+                color: const Color(0xFF1976D2),
+                title: 'البريد الإلكتروني',
+                subtitle: 'support@iraqhealth.net',
+                isFa: false,
+                onTap: () async {
+                  final String subject =
+                      Uri.encodeComponent('دعم تطبيق المدار الطبي');
+                  final Uri mailUri = Uri.parse(
+                      'mailto:support@iraqhealth.net?subject=$subject');
+                  await launchUrl(mailUri,
+                      mode: LaunchMode.externalApplication);
+                },
+              ),
+              const SizedBox(height: 10),
+              _supportTile(
+                icon: FontAwesomeIcons.instagram,
+                color: const Color(0xFFE1306C),
+                title: 'إنستغرام',
+                subtitle: '@iraqhealth_',
+                isFa: true,
+                onTap: () async {
+                  final Uri igUri =
+                      Uri.parse('https://instagram.com/iraqhealth_');
+                  if (await canLaunchUrl(igUri)) unawaited(launchUrl(igUri));
+                },
+              ),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.background,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'للإبلاغ عن طبيب أو اقتراح إضافة بيانات جديدة، استخدم زر "اقتراح تعديل" على بطاقة الطبيب مباشرة.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textSecond,
+                    height: 1.5,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _supportTile({
+    required Object icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required bool isFa,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+                color: color.withValues(alpha: 0.2), width: 0.8),
+          ),
+          child: Row(
+            children: <Widget>[
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Center(
+                  child: isFa
+                      ? FaIcon(icon as FaIconData, size: 18, color: color)
+                      : Icon(icon as IconData, size: 20, color: color),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(title,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF0A2540),
+                        )),
+                    Text(subtitle,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: color,
+                          fontWeight: FontWeight.w600,
+                        )),
+                  ],
+                ),
+              ),
+              Icon(Icons.arrow_forward_ios_rounded,
+                  size: 13, color: Colors.grey.shade400),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LuxChip extends StatelessWidget {
+  const _LuxChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primary : AppColors.surface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.border,
+            width: selected ? 1.5 : 1,
+          ),
+          boxShadow: selected
+              ? <BoxShadow>[
+                  BoxShadow(
+                    color: AppColors.primary.withValues(alpha: 0.15),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight:
+                selected ? FontWeight.w700 : FontWeight.w500,
+            color: selected ? Colors.white : AppColors.textSecond,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniAction extends StatelessWidget {
+  const _MiniAction({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.isFa,
+    required this.onTap,
+  });
+
+  final Object icon;
+  final Color color;
+  final String tooltip;
+  final bool isFa;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color iconColor = onTap == null ? Colors.grey.shade400 : color;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          margin: const EdgeInsetsDirectional.only(end: 6),
+          decoration: BoxDecoration(
+            color: onTap == null
+                ? Colors.grey.shade100
+                : color.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: onTap == null
+                  ? Colors.grey.shade200
+                  : color.withValues(alpha: 0.25),
+              width: 0.8,
+            ),
+          ),
+          child: isFa
+              ? FaIcon(icon as FaIconData, size: 15, color: iconColor)
+              : Icon(icon as IconData, size: 16, color: iconColor),
+        ),
+      ),
+    );
+  }
+}
+
+class _DrawerItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String? subtitle;
+  final Color iconColor;
+  final Color labelColor;
+  final Widget? trailing;
+  final VoidCallback onTap;
+
+  const _DrawerItem({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.subtitle,
+    this.iconColor = Colors.white70,
+    this.labelColor = Colors.white,
+    this.trailing,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        splashColor: Colors.white10,
+        highlightColor: Colors.white10,
+        child: Padding(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
+          child: Row(
+            children: <Widget>[
+              Icon(icon, color: iconColor, size: 20),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: labelColor,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (subtitle != null)
+                      Text(
+                        subtitle!,
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              ?trailing,
+            ],
           ),
         ),
       ),
@@ -3673,7 +4380,7 @@ class _SpecVisual {
   });
 
   final List<Color> gradientColors;
-  final IconData faIcon;
+  final FaIconData faIcon;
 
   static _SpecVisual forSpecialization(String spec) {
     // نطبيع النص العربي: نزيل الهمزات لمطابقة الصيغ المختلفة (أنف/انف،
