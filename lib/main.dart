@@ -2,10 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' show PlatformDispatcher;
 
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
@@ -52,27 +53,6 @@ import 'core/cache/hive_cache_service.dart';
 import 'core/cache/sp_doctors_cache.dart';
 import 'services/crashlytics_service.dart';
 
-const String _kAdminPasswordFromDefine =
-    String.fromEnvironment('ADMIN_PASSWORD');
-
-/// Optional local **debug** password when `ADMIN_PASSWORD` is not set via
-/// `--dart-define` or `.vscode/launch.json`. Keep empty in git.
-const String kAdminPasswordDebugOnly = '';
-
-/// Resolved admin password: compile-time define wins; otherwise [kAdminPasswordDebugOnly]
-/// in debug builds only (release always ignores the fallback).
-String get kAdminPassword {
-  if (_kAdminPasswordFromDefine.isNotEmpty) {
-    return _kAdminPasswordFromDefine;
-  }
-  if (kDebugMode && kAdminPasswordDebugOnly.isNotEmpty) {
-    return kAdminPasswordDebugOnly;
-  }
-  return '';
-}
-
-bool get _canBypassAdminPasswordInDebug => kDebugMode && kAdminPassword.isEmpty;
-
 /// Allowed `public.reports.status` values — must match `reports_status_check`
 /// constraint and RLS policies in Supabase migrations.
 const String kReportStatusPending = 'pending';
@@ -80,40 +60,6 @@ const String kReportStatusReviewed = 'reviewed';
 const String kReportStatusResolved = 'resolved';
 const String kReportStatusDismissed = 'dismissed';
 
-String _normalizeAdminPassword(String value) {
-  // يوحّد الأرقام العربية/الفارسية مع الإنجليزية ويزيل المحارف المخفية.
-  const Map<String, String> digitMap = <String, String>{
-    '٠': '0',
-    '١': '1',
-    '٢': '2',
-    '٣': '3',
-    '٤': '4',
-    '٥': '5',
-    '٦': '6',
-    '٧': '7',
-    '٨': '8',
-    '٩': '9',
-    '۰': '0',
-    '۱': '1',
-    '۲': '2',
-    '۳': '3',
-    '۴': '4',
-    '۵': '5',
-    '۶': '6',
-    '۷': '7',
-    '۸': '8',
-    '۹': '9',
-  };
-  final StringBuffer normalized = StringBuffer();
-  for (final int rune in value.trim().runes) {
-    final String ch = String.fromCharCode(rune);
-    if (ch == '\u200e' || ch == '\u200f' || ch == '\u202a' || ch == '\u202c') {
-      continue;
-    }
-    normalized.write(digitMap[ch] ?? ch);
-  }
-  return normalized.toString();
-}
 
 /// أسماء جداول Supabase المربوطة بـ (اقتراح تعديل) و(إضافة عيادة) والعرض.
 const String kSupabaseReportsTable = 'reports';
@@ -260,6 +206,9 @@ class IraqHealthApp extends StatelessWidget {
         }
         return null;
       },
+      navigatorObservers: kIsWeb
+          ? []
+          : [FirebaseAnalyticsObserver(analytics: FirebaseAnalytics.instance)],
       home: const Directionality(
         textDirection: TextDirection.rtl,
         child: AuthGate(),
@@ -328,8 +277,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
   bool _isFilterFetching = false;
   /// Unique key for the in-flight filter fetch; used to discard stale responses.
   String? _activeFilterKey;
-  int _adminTapCounter = 0;
-  Timer? _adminTapResetTimer;
 
   /// 0: الرئيسية، 1: أطبائي (المفضلة).
   int _homeNavIndex = 0;
@@ -1358,91 +1305,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  Future<void> _handleAdminTitleTap() async {
-    _adminTapResetTimer?.cancel();
-    _adminTapResetTimer = Timer(const Duration(seconds: 3), () {
-      _adminTapCounter = 0;
-    });
-    _adminTapCounter += 1;
-    if (_adminTapCounter < 4) {
-      return;
-    }
-    _adminTapCounter = 0;
-    _adminTapResetTimer?.cancel();
-    if (kAdminPassword.isEmpty) {
-      if (_canBypassAdminPasswordInDebug) {
-        if (!mounted) {
-          return;
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'وضع التطوير: تم فتح لوحة الأدمن بدون كلمة مرور (ADMIN_PASSWORD غير مكوّنة).',
-            ),
-            duration: Duration(seconds: 3),
-          ),
-        );
-        Navigator.pushNamed(context, '/admin', arguments: true);
-        return;
-      }
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'كلمة مرور الأدمن غير مكوّنة. أضف ADMIN_PASSWORD في .vscode/launch.json أو --dart-define=ADMIN_PASSWORD=...',
-            ),
-            duration: Duration(seconds: 4),
-          ),
-        );
-      }
-      return;
-    }
-    String enteredPassword = '';
-    final bool? allowed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text('دخول الأدمن'),
-          content: TextField(
-            obscureText: true,
-            onChanged: (String value) => enteredPassword = value,
-            decoration: const InputDecoration(
-              labelText: 'أدخل كلمة المرور',
-              filled: true,
-              fillColor: Color(0xFFF2F7FC),
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('إلغاء'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.of(dialogContext)
-                    .pop(
-                      _normalizeAdminPassword(enteredPassword) ==
-                          _normalizeAdminPassword(kAdminPassword),
-                    );
-              },
-              child: const Text('دخول'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (!mounted || allowed != true) {
-      if (allowed == false && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('كلمة المرور غير صحيحة')),
-        );
-      }
-      return;
-    }
-    Navigator.pushNamed(context, '/admin', arguments: true);
-  }
-
   String _normalizePhone(String phone) {
     return phone.replaceAll(RegExp(r'[^0-9+]'), '');
   }
@@ -1997,25 +1859,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
                           ),
                         ],
 
-                        if (kDebugMode && !kIsWeb) ...<Widget>[
-                          Divider(
-                            color: Colors.white.withValues(alpha: 0.08),
-                            height: 16,
-                            indent: 20,
-                            endIndent: 20,
-                          ),
-                          _DrawerItem(
-                            icon: Icons.bug_report_outlined,
-                            label: 'اختبار Crashlytics',
-                            iconColor: Colors.redAccent,
-                            labelColor: Colors.redAccent,
-                            onTap: () {
-                              Navigator.pop(ctx);
-                              FirebaseCrashlytics.instance.crash();
-                            },
-                          ),
-                        ],
-
                         const Spacer(),
 
                         // ── Footer: logout or login ────────────
@@ -2059,7 +1902,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
 
   @override
   void dispose() {
-    _adminTapResetTimer?.cancel();
     _searchAnalyticsDebounceTimer?.cancel();
     _authStateSub?.cancel();
     _authStateSub = null;
@@ -2179,7 +2021,6 @@ class _IraqHealthHomePageState extends State<IraqHealthHomePage> {
             ),
             title: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: _handleAdminTitleTap,
               child: const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
