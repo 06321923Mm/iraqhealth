@@ -21,12 +21,14 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           set -e
-          {
-            echo "SUPABASE_URL=${SUPABASE_URL}"
-            echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
-            echo ""
-          } > assets/env/flutter.env
-          cat assets/env/flutter.env.example >> assets/env/flutter.env
+          # Only overwrite the committed flutter.env when secrets are available.
+          # Without this guard, an unset secret produces an empty file and
+          # Supabase initialises with blank credentials, breaking login.
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_ANON_KEY" ]; then
+            printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n\n' \
+              "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > assets/env/flutter.env
+            cat assets/env/flutter.env.example >> assets/env/flutter.env
+          fi
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
