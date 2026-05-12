@@ -69,3 +69,7 @@ supabase/.temp/
 
 # قيم Supabase المحلية — انسخ من flutter.env.example
 assets/env/flutter.env
+
+# ملفات مُولَّدة للتحليل — لا تُرفع
+repomix-output.xml
+repomix-output*.xml
