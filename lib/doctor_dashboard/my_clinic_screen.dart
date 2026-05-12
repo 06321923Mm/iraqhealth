@@ -10,6 +10,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_blurhash/flutter_blurhash.dart';
 
 import '../core/components/loading_button.dart';
+import '../services/crashlytics_service.dart';
 import '../core/components/status_badge.dart';
 import '../core/config/app_endpoints.dart';
 import '../core/services/image_processing_service.dart';
@@ -85,6 +86,7 @@ class _MyClinicScreenState extends State<MyClinicScreen> {
   @override
   void initState() {
     super.initState();
+    CrashlyticsService.instance.setScreen('my_clinic');
     _loadMyClinic();
   }
 

@@ -223,7 +223,7 @@ class _SocialButton extends StatelessWidget {
 
   final VoidCallback? onPressed;
   final bool isLoading;
-  final IconData icon;
+  final FaIconData icon;
   final String label;
   final Color backgroundColor;
   final Color foregroundColor;

@@ -9,57 +9,70 @@ workflows:
       xcode: latest
       cocoapods: default
       vars:
-        BUNDLE_ID: com.example.iraqHealth
+        BUNDLE_ID: net.iraqhealth.app
         APP_STORE_APPLE_ID: Automatic
       groups:
-        - app_secrets        # SUPABASE_URL, SUPABASE_ANON_KEY, GOOGLE_MAPS_IOS_KEY
-        - firebase_ios       # FIREBASE_IOS_GOOGLE_SERVICES (base64 GoogleService-Info.plist)
-        - ios_signing        # CM_CERTIFICATE, CM_CERTIFICATE_PASSWORD, CM_PROVISIONING_PROFILE
+        - app_secrets          # SUPABASE_URL, SUPABASE_ANON_KEY, GOOGLE_MAPS_IOS_KEY
+        - firebase_ios         # FIREBASE_IOS_GOOGLE_SERVICES (base64 GoogleService-Info.plist)
+        - ios_signing          # CM_CERTIFICATE, CM_CERTIFICATE_PASSWORD, CM_PROVISIONING_PROFILE
 
     triggering:
       events:
-        - push
-      branch_patterns:
-        - pattern: main
+        - tag
+      tag_patterns:
+        - pattern: 'v*'
           include: true
 
     scripts:
+      - name: Prepare Supabase env file
+        script: |
+          set -e
+          {
+            echo "SUPABASE_URL=$SUPABASE_URL"
+            echo "SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY"
+            echo ""
+          } > assets/env/flutter.env
+          cat assets/env/flutter.env.example >> assets/env/flutter.env
+
       - name: Set up GoogleService-Info.plist
         script: |
-          echo $FIREBASE_IOS_GOOGLE_SERVICES | base64 --decode > $CM_BUILD_DIR/ios/Runner/GoogleService-Info.plist
+          echo "$FIREBASE_IOS_GOOGLE_SERVICES" | base64 --decode \
+            > "$CM_BUILD_DIR/ios/Runner/GoogleService-Info.plist"
 
       - name: Set up Maps API key
         script: |
           echo "MAPS_API_KEY=$GOOGLE_MAPS_IOS_KEY" > ios/Flutter/MapsApiKey.xcconfig
 
-      - name: Install dependencies
-        script: flutter pub get
-
-      - name: Install pods
-        script: |
-          find . -name "Podfile" -execdir pod install \;
-
       - name: Set up code signing
         script: |
           keychain initialize
-          certificate add --certificate /tmp/certificate.p12 --password $CM_CERTIFICATE_PASSWORD
-          profile add --profile /tmp/profile.mobileprovision
-        ignore_failure: true
+          echo "$CM_CERTIFICATE" | base64 --decode > /tmp/cert.p12
+          keychain add-certificates --certificate /tmp/cert.p12 \
+            --certificate-password "$CM_CERTIFICATE_PASSWORD"
+          echo "$CM_PROVISIONING_PROFILE" | base64 --decode \
+            > /tmp/profile.mobileprovision
+          xcode-project use-profiles --profile /tmp/profile.mobileprovision
+
+      - name: Install Flutter dependencies
+        script: flutter pub get
+
+      - name: Install CocoaPods
+        script: |
+          cd ios && pod install
 
       - name: Build iOS IPA
         script: |
           flutter build ipa \
             --release \
-            --dart-define=SUPABASE_URL=$SUPABASE_URL \
-            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
-            --export-options-plist=/Users/builder/export_options.plist \
-            --build-name=1.0.0 \
-            --build-number=$PROJECT_BUILD_NUMBER
+            --dart-define=SUPABASE_URL="$SUPABASE_URL" \
+            --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+            --build-name="1.0.$CM_BUILD_NUMBER" \
+            --build-number="$CM_BUILD_NUMBER" \
+            --export-options-plist="$CM_BUILD_DIR/ios/ExportOptions.plist"
 
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
-      - flutter_drive.log
 
     publishing:
       email:
@@ -68,3 +81,8 @@ workflows:
         notify:
           success: true
           failure: true
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true

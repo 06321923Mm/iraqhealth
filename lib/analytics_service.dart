@@ -96,4 +96,20 @@ class AnalyticsService {
       if (detail.isNotEmpty) 'detail': detail,
     });
   }
+
+  /// Logs how long (milliseconds) it took to show the first doctor card.
+  Future<void> logLoadTime(String governorate, int ms, {bool cacheHit = false}) {
+    return _logEvent('load_time', <String, Object?>{
+      'governorate': governorate,
+      'ms': ms,
+      'cache_hit': cacheHit ? 1 : 0,
+    });
+  }
+
+  /// Logs a governorate switch — helps understand which gove gets the most traffic.
+  Future<void> logGovernorateSelected(String governorate) {
+    return _logEvent('governorate_selected', <String, Object?>{
+      'governorate': governorate,
+    });
+  }
 }

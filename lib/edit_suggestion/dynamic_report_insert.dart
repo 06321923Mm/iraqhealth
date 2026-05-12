@@ -23,6 +23,8 @@ class DynamicReportInsertBuilder {
     double? suggestedLatitude,
     double? suggestedLongitude,
     Map<String, dynamic>? metadataExtra,
+    /// When the `reports` table has `user_id` and the reporter is signed in.
+    String? reporterUserId,
   }) {
     final EditSuggestionTarget? t = bundle.primaryTarget;
     if (t == null) {
@@ -38,6 +40,7 @@ class DynamicReportInsertBuilder {
     }
 
     putIfHas(fkCol, targetPkValue);
+    putIfHas('user_id', reporterUserId);
 
     final bool loc = isCoordinateLikeColumn(selectedField) ||
         isMapsLinkOrLocationTextColumn(selectedField);

@@ -53,7 +53,7 @@ class VerificationRepository extends BaseService {
             'id_card_back_url':      idCardBackPath,
             'medical_license_url':   medicalLicensePath,
             // Legacy uuid column from doctor_id→bigint migration; DB may still require NOT NULL.
-            'doctor_user_id_legacy': ?ownerUid,
+            'doctor_user_id_legacy': ownerUid,
           }),
       context: 'submitVerificationRequest',
     );

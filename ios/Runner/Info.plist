@@ -70,6 +70,12 @@
 	<string>$(MAPS_API_KEY)</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>نستخدم موقعك لعرضه على الخريطة عند اختيار موقع العيادة.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>نستخدم مكتبة الصور لاختيار صورة الملف الشخصي للعيادة أو وثائق التوثيق.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>نستخدم الكاميرا لالتقاط صور وثائق التوثيق الطبي.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>نحفظ الصور في مكتبتك عند الحاجة.</string>
 	<key>GIDClientID</key>
 	<string>63970501606-j9r8789mcj1i1j7fvt2c0gj50s247ejr.apps.googleusercontent.com</string>
 	<key>CFBundleURLTypes</key>

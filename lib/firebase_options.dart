@@ -10,6 +10,8 @@ class DefaultFirebaseOptions {
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
         return android;
+      case TargetPlatform.iOS:
+        return ios;
       default:
         throw UnsupportedError(
           'Firebase is not configured for $defaultTargetPlatform.',
@@ -39,6 +41,18 @@ class DefaultFirebaseOptions {
     messagingSenderId: '63970501606',
     projectId: 'iraqhealth-b08f6',
     storageBucket: 'iraqhealth-b08f6.firebasestorage.app',
+  );
+
+  /// iOS — values from `ios/Runner/GoogleService-Info.plist`.
+  static const FirebaseOptions ios = FirebaseOptions(
+    apiKey: 'AIzaSyCjTV_pyzo1NgNI2DFe7XKpdl8J5YjGU7A',
+    appId: '1:63970501606:ios:d872fa159dc823a150ec27',
+    messagingSenderId: '63970501606',
+    projectId: 'iraqhealth-b08f6',
+    storageBucket: 'iraqhealth-b08f6.firebasestorage.app',
+    iosClientId:
+        '63970501606-hsbr2e31369dubanuf96p4v6fcopps3i.apps.googleusercontent.com',
+    iosBundleId: 'net.iraqhealth.app',
   );
 
 }

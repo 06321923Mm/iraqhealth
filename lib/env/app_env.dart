@@ -5,10 +5,8 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 class AppEnv {
   AppEnv._();
 
-  static const String _defaultSupabaseUrl =
-      'https://hygujebngiwemwujjcgm.supabase.co';
-  static const String _defaultSupabaseAnonKey =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5Z3VqZWJuZ2l3ZW13dWpqY2dtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3Njg1MjAsImV4cCI6MjA5MTM0NDUyMH0.p9hhJZ8L45ZqwQKuq5TCPWEa2xxBNl0AqHPQUjP1Xvs';
+  static const String _defaultSupabaseUrl = '';
+  static const String _defaultSupabaseAnonKey = '';
 
   static String _fromDefine(String key) {
     const Map<String, String> defines = <String, String>{
@@ -35,7 +33,21 @@ class AppEnv {
 
   /// يُستدعى من [main] بعد [WidgetsFlutterBinding.ensureInitialized].
   static Future<void> loadAppEnv() async {
-    await dotenv.load(fileName: 'assets/env/flutter.env');
+    try {
+      await dotenv.load(fileName: 'assets/env/flutter.env');
+    } catch (_) {
+      // اختياري محلياً؛ CI يعتمد على `--dart-define` فقط.
+    }
+  }
+
+  /// في وضع التطوير: يتأكد من ضبط Supabase عبر dart-define أو flutter.env.
+  static void assertConfigured() {
+    assert(
+      supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty,
+      'FATAL: SUPABASE_URL and SUPABASE_ANON_KEY must be provided via '
+      '--dart-define or assets/env/flutter.env. '
+      'Never hardcode them in source.',
+    );
   }
 
   static String get supabaseUrl => _firstNonEmpty(<String>[

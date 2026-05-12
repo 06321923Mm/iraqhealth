@@ -11,6 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare Supabase env file
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -e
+          {
+            echo "SUPABASE_URL=${SUPABASE_URL}"
+            echo "SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}"
+            echo ""
+          } > assets/env/flutter.env
+          cat assets/env/flutter.env.example >> assets/env/flutter.env
+
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -22,7 +35,9 @@ jobs:
         run: flutter pub get
 
       - name: Build Web
-        run: flutter build web --release --base-href "/"
+        run: |
+          flutter build web --release --base-href "/" \
+            --dart-define=OAUTH_REDIRECT_URL=https://iraqhealth.net/
 
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3

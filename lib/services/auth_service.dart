@@ -28,7 +28,8 @@ class AuthService {
     'profile',
   ];
 
-  GoogleSignIn? _googleSignIn;
+  /// [google_sign_in] 7.x: [GoogleSignIn.initialize] once per process.
+  bool _embeddedGoogleConfigured = false;
 
   String get _googleServerClientId => AppEnv.googleWebClientId.isNotEmpty
       ? AppEnv.googleWebClientId
@@ -50,23 +51,13 @@ class AuthService {
       (defaultTargetPlatform == TargetPlatform.iOS ||
           defaultTargetPlatform == TargetPlatform.macOS);
 
-  GoogleSignIn _googleSignInEmbedded() {
-    if (!_usesEmbeddedGoogleSdk) {
-      throw UnsupportedError('Google SDK محلي غير مدعوم على هذه المنصة.');
-    }
-    _googleSignIn ??= switch (defaultTargetPlatform) {
-      TargetPlatform.android => GoogleSignIn(
-          serverClientId: _googleServerClientId,
-          scopes: _googleScopes,
-        ),
-      TargetPlatform.iOS || TargetPlatform.macOS => GoogleSignIn(
-          clientId: _iosClientId,
-          serverClientId: _googleServerClientId,
-          scopes: _googleScopes,
-        ),
-      _ => throw UnsupportedError('Google SDK محلي غير مدعوم على هذه المنصة.'),
-    };
-    return _googleSignIn!;
+  Future<void> _ensureEmbeddedGoogleConfigured() async {
+    if (_embeddedGoogleConfigured) return;
+    await GoogleSignIn.instance.initialize(
+      clientId: _iosClientId,
+      serverClientId: _googleServerClientId,
+    );
+    _embeddedGoogleConfigured = true;
   }
 
   /// Google:
@@ -87,42 +78,44 @@ class AuthService {
     }
 
     if (_usesEmbeddedGoogleSdk) {
-      final GoogleSignIn googleSignIn = _googleSignInEmbedded();
+      await _ensureEmbeddedGoogleConfigured();
       try {
-        await googleSignIn.signOut();
+        await GoogleSignIn.instance.signOut();
       } catch (_) {
         // لا توجد جلسة سابقة — نكمل
       }
 
-      GoogleSignInAccount? account;
       try {
-        account = await googleSignIn.signIn();
-      } on PlatformException catch (e) {
-        // sign_in_canceled → المستخدم أغلق النافذة
-        if (e.code == 'sign_in_canceled') return;
+        final GoogleSignInAccount account = await GoogleSignIn.instance
+            .authenticate(scopeHint: _googleScopes);
+
+        final GoogleSignInAuthentication auth = account.authentication;
+        final String? idToken = auth.idToken;
+
+        if (idToken == null || idToken.isEmpty) {
+          throw const AuthException(
+            'تعذّر الحصول على رمز التعريف. '
+            'تأكد أن SHA-1 مضاف في Google Cloud Console وأن serverClientId يطابق معرّف عميل Web.',
+          );
+        }
+
+        await _client.auth.signInWithIdToken(
+          provider: OAuthProvider.google,
+          idToken: idToken,
+        );
+        return;
+      } on GoogleSignInException catch (e) {
+        if (e.code == GoogleSignInExceptionCode.canceled ||
+            e.code == GoogleSignInExceptionCode.interrupted ||
+            e.code == GoogleSignInExceptionCode.uiUnavailable) {
+          return;
+        }
         CrashlyticsService.instance.logAuthFailure('google', e);
-        throw AuthException('فشل تسجيل الدخول بجوجل (${e.code}): ${e.message}');
-      }
-
-      // null = المستخدم أغلق نافذة الاختيار
-      if (account == null) return;
-
-      final GoogleSignInAuthentication auth = await account.authentication;
-      final String? idToken = auth.idToken;
-
-      if (idToken == null || idToken.isEmpty) {
-        throw const AuthException(
-          'تعذّر الحصول على رمز التعريف. '
-          'تأكد أن SHA-1 مضاف في Google Cloud Console وأن serverClientId يطابق معرّف عميل Web.',
+        throw AuthException(
+          'فشل تسجيل الدخول بجوجل (${e.code.name}): '
+          '${e.description ?? e.toString()}',
         );
       }
-
-      await _client.auth.signInWithIdToken(
-        provider: OAuthProvider.google,
-        idToken: idToken,
-        accessToken: auth.accessToken,
-      );
-      return;
     }
 
     try {
@@ -162,18 +155,22 @@ class AuthService {
   }
 
   Future<void> signOut() async {
-    if (_usesEmbeddedGoogleSdk) {
+    if (_usesEmbeddedGoogleSdk && _embeddedGoogleConfigured) {
       try {
-        await _googleSignInEmbedded().signOut();
+        await GoogleSignIn.instance.signOut();
       } catch (_) {
         // لا جلسة Google محلية
       }
     }
-    _googleSignIn = null;
     await _client.auth.signOut();
   }
 
   String _webRedirectTo() {
+    // استخدم OAUTH_REDIRECT_URL إن كان https (مُمرَّر عبر --dart-define في CI للإنتاج).
+    // إن كان deep-link للموبايل أو فارغاً، ارجع إلى Uri.base الديناميكي.
+    final String envUrl = AppEnv.oauthRedirectUrl;
+    if (envUrl.startsWith('https://')) return envUrl;
+
     final Uri base = Uri.base;
     if (base.hasEmptyPath || base.path == '/') {
       return '${base.origin}/';

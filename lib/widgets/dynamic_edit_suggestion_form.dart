@@ -266,6 +266,7 @@ class _DynamicEditSuggestionFormState extends State<DynamicEditSuggestionForm> {
       statusPendingValue: widget.statusPendingValue,
       suggestedLatitude: _coordMode ? _pickedLat : null,
       suggestedLongitude: _coordMode ? _pickedLng : null,
+      reporterUserId: _supabase.auth.currentUser?.id,
     );
 
     try {

@@ -66,3 +66,6 @@ tools/geocode-doctors/node_modules/
 
 # Supabase temp files
 supabase/.temp/
+
+# قيم Supabase المحلية — انسخ من flutter.env.example
+assets/env/flutter.env

@@ -8,6 +8,7 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
     id("com.google.gms.google-services")
     id("com.google.firebase.crashlytics")
+    id("com.google.firebase.firebase-perf")
 }
 
 val keystorePropertiesFile = project.file("../key.properties")
@@ -49,8 +50,10 @@ android {
         // Android 8.0 (Oreo) فما فوق
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // versionCode and versionName are injected by CI via --build-number and
+        // --build-name. The defaults here are for local debug builds only.
+        versionCode = (System.getenv("BUILD_NUMBER")?.toIntOrNull()) ?: 1
+        versionName = System.getenv("BUILD_NAME") ?: "1.0.0"
         manifestPlaceholders["MAPS_API_KEY"] = resolvedMapsApiKey
     }
 

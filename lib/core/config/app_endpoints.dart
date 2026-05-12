@@ -20,6 +20,7 @@ abstract final class AppEndpoints {
   static const String adminApplyCoordCorrection    = 'admin_apply_coord_correction';
   static const String suggestSpecialization        = 'suggest_specialization';
   static const String getDoctorsPageKeyset         = 'get_doctors_page_keyset';
+  static const String getDoctorsFilters            = 'get_doctors_filters';
   static const String findDuplicateDoctor          = 'find_duplicate_doctor';
   static const String dailyReportQuota             = 'daily_report_quota';
   static const String refreshDoctorReportRatios    = 'refresh_doctor_report_ratios';

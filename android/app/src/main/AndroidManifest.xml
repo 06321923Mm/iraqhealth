@@ -5,6 +5,13 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- image_picker: Android 13+ (API 33+) photo access -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <!-- image_picker: Android ≤12 (API ≤32) storage fallback -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+    <!-- image_picker: camera capture -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
         android:label="المدار الطبي"
         android:name="${applicationName}"

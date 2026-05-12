@@ -54,7 +54,11 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
       // عند العودة من المتصفح بعد OAuth — يجبر supabase_flutter على فحص الجلسة
       final session = Supabase.instance.client.auth.currentSession;
       if (session != null) {
-        Supabase.instance.client.auth.refreshSession().ignore();
+        Supabase.instance.client.auth.refreshSession().then<void>(
+          (_) {},
+          onError: (Object e, StackTrace s) =>
+              CrashlyticsService.instance.logError(e, s, reason: 'refresh_session'),
+        );
       } else {
         Supabase.instance.client.auth.getUser().ignore();
       }

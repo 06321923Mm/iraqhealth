@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../core/auth/admin_session.dart';
+import '../../../../services/crashlytics_service.dart';
 import '../../../../core/config/app_endpoints.dart';
 import '../../../../edit_suggestion/edit_suggestion_schema_service.dart';
 import '../../../../edit_suggestion/schema_models.dart';
@@ -44,6 +45,7 @@ class _AdminHubPageState extends State<AdminHubPage>
   @override
   void initState() {
     super.initState();
+    CrashlyticsService.instance.setScreen('admin_hub');
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
